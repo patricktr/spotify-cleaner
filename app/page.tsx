@@ -19,51 +19,65 @@ export default async function HomePage() {
   `) as unknown as AccountRow[];
 
   return (
-    <main style={{ padding: '2rem', maxWidth: 720 }}>
-      <h1>Spotify Cleaner</h1>
-      <p style={{ color: '#666' }}>Family music library audit.</p>
-
-      <section style={{ marginTop: '2rem' }}>
-        <h2>Connected accounts</h2>
-        {accounts.length === 0 ? (
-          <p style={{ color: '#888' }}>No accounts connected yet.</p>
-        ) : (
-          <ul>
-            {accounts.map((a) => (
-              <li key={a.id}>
-                <strong>{a.display_name}</strong> <span style={{ color: '#888' }}>({a.role})</span>
-                {a.cleanup_enabled && <span style={{ color: '#c33', marginLeft: 8 }}>cleanup ON</span>}
-              </li>
-            ))}
-          </ul>
-        )}
+    <>
+      <section className="section">
+        <div className="section-header">
+          <h2>Connected accounts</h2>
+        </div>
+        <div className="card">
+          {accounts.length === 0 ? (
+            <p className="empty">No accounts connected yet.</p>
+          ) : (
+            <ul className="account-list">
+              {accounts.map((a) => (
+                <li key={a.id} className="account-row">
+                  <span className="account-name">{a.display_name}</span>
+                  <span className="badge badge-role">{a.role}</span>
+                  {a.cleanup_enabled && (
+                    <span className="badge badge-cleanup">cleanup on</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </section>
 
-      <section style={{ marginTop: '2rem' }}>
-        <h2>Connect a new account</h2>
-        <form action="/api/spotify/connect" method="get" style={{ display: 'grid', gap: '0.75rem', maxWidth: 320 }}>
-          <label>
-            Display name
-            <br />
-            <input name="display_name" required style={{ width: '100%', padding: '0.4rem' }} />
-          </label>
-          <label>
-            Role
-            <br />
-            <select name="role" defaultValue="kid" style={{ width: '100%', padding: '0.4rem' }}>
-              <option value="admin">admin</option>
-              <option value="parent">parent</option>
-              <option value="kid">kid</option>
-            </select>
-          </label>
-          <label>
-            <input type="checkbox" name="cleanup_enabled" value="true" /> Enable cleanup cron
-          </label>
-          <button type="submit" style={{ padding: '0.5rem 1rem' }}>
-            Sign in with Spotify
-          </button>
-        </form>
+      <section className="section">
+        <div className="section-header">
+          <h2>Connect a new account</h2>
+        </div>
+        <div className="card">
+          <form action="/api/spotify/connect" method="get" className="form">
+            <div className="field">
+              <label className="field-label" htmlFor="display_name">
+                Display name
+              </label>
+              <input id="display_name" name="display_name" type="text" required />
+            </div>
+
+            <div className="field">
+              <label className="field-label" htmlFor="role">
+                Role
+              </label>
+              <select id="role" name="role" defaultValue="kid">
+                <option value="admin">admin</option>
+                <option value="parent">parent</option>
+                <option value="kid">kid</option>
+              </select>
+            </div>
+
+            <label className="field-inline">
+              <input type="checkbox" name="cleanup_enabled" value="true" />
+              Enable cleanup cron
+            </label>
+
+            <button type="submit" className="btn btn-primary">
+              Sign in with Spotify
+            </button>
+          </form>
+        </div>
       </section>
-    </main>
+    </>
   );
 }
