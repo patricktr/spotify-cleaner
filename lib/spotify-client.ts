@@ -126,13 +126,26 @@ export interface SpotifyArtist {
 
 export async function getArtists(token: string, ids: string[]): Promise<SpotifyArtist[]> {
   if (ids.length === 0) return [];
+  // Spotify's batch /artists?ids=... endpoint returns 403 for apps in
+  // Development Mode (post Nov 2024). The per-artist /artists/{id} endpoint
+  // still works, so fan out single-artist calls in parallel chunks.
+  // Individual failures are logged and skipped rather than throwing,
+  // so one bad artist doesn't tank an entire scan.
   const out: SpotifyArtist[] = [];
-  for (let i = 0; i < ids.length; i += 50) {
-    const batch = ids.slice(i, i + 50);
-    const res = await spotifyFetch(token, `/artists?ids=${batch.join(',')}`);
-    if (!res.ok) throw new Error(`/artists failed: ${res.status} ${await res.text()}`);
-    const json = (await res.json()) as { artists: SpotifyArtist[] };
-    out.push(...json.artists);
+  const CHUNK_SIZE = 10;
+  for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + CHUNK_SIZE);
+    const settled = await Promise.allSettled(
+      chunk.map(async (id) => {
+        const res = await spotifyFetch(token, `/artists/${id}`);
+        if (!res.ok) throw new Error(`/artists/${id} failed: ${res.status}`);
+        return (await res.json()) as SpotifyArtist;
+      }),
+    );
+    for (const r of settled) {
+      if (r.status === 'fulfilled') out.push(r.value);
+      else console.warn('[getArtists] skipping artist:', r.reason instanceof Error ? r.reason.message : r.reason);
+    }
   }
   return out;
 }
@@ -148,17 +161,18 @@ export interface SpotifyAudioFeatures {
   loudness: number;
 }
 
-export async function getAudioFeatures(token: string, ids: string[]): Promise<SpotifyAudioFeatures[]> {
-  if (ids.length === 0) return [];
-  const out: SpotifyAudioFeatures[] = [];
-  for (let i = 0; i < ids.length; i += 100) {
-    const batch = ids.slice(i, i + 100);
-    const res = await spotifyFetch(token, `/audio-features?ids=${batch.join(',')}`);
-    if (!res.ok) throw new Error(`/audio-features failed: ${res.status} ${await res.text()}`);
-    const json = (await res.json()) as { audio_features: Array<SpotifyAudioFeatures | null> };
-    out.push(...json.audio_features.filter((f): f is SpotifyAudioFeatures => f !== null));
-  }
-  return out;
+export async function getAudioFeatures(_token: string, _ids: string[]): Promise<SpotifyAudioFeatures[]> {
+  // Spotify deprecated /audio-features (single + batch) for apps in
+  // Development Mode in late 2024. Both /audio-features/{id} and
+  // /audio-features?ids=... now return 403 Forbidden for our app.
+  //
+  // The classifier doesn't use audio features anyway — heuristics rely on
+  // artist metadata, track popularity, release date, and the title regex.
+  // Audio-feature columns in the `tracks` table will stay NULL, which is fine.
+  //
+  // If this app is ever promoted to Extended Quota Mode, restore the batched
+  // implementation from git history (commit 72ff8fd).
+  return [];
 }
 
 export interface SpotifyPlayHistory {
