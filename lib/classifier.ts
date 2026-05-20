@@ -10,11 +10,21 @@ export interface ClassificationResult {
     heuristics?: string[];
     llm_reasoning?: string;
     llm_model?: string;
+    heuristics_only?: boolean;
+    note?: string;
   };
 }
 
 export const CLASSIFIER_VERSION = 'heuristics-v1+claude-opus-4-7';
+export const CLASSIFIER_VERSION_HEURISTICS_ONLY = 'heuristics-v1';
 export const AUTO_UNLIKE_THRESHOLD = parseFloat(process.env.AUTO_UNLIKE_THRESHOLD ?? '0.7');
+
+export function isLlmEnabled(): boolean {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (typeof key !== 'string' || key.length === 0) return false;
+  if (process.env.LLM_CLASSIFIER_ENABLED === 'false') return false;
+  return true;
+}
 
 const TOILET_HUMOR_RE =
   /\b(poop(?:ers?|y|ed|ing)?|poo|fart(?:s|ing|ed)?|tushy|pee[\s-]?pee|booger|wee[\s-]?wee|tinkle|toot|toots|stinky)\b/i;
@@ -144,7 +154,18 @@ export async function classifyTrack(
   artists: SpotifyArtist[],
 ): Promise<ClassificationResult & { classifier_version: string }> {
   const heuristic = hardHeuristics(track, artists[0]);
-  if (heuristic) return { ...heuristic, classifier_version: CLASSIFIER_VERSION };
+  if (heuristic) {
+    const version = isLlmEnabled() ? CLASSIFIER_VERSION : CLASSIFIER_VERSION_HEURISTICS_ONLY;
+    return { ...heuristic, classifier_version: version };
+  }
+  if (!isLlmEnabled()) {
+    return {
+      verdict: 'borderline',
+      confidence: 0.5,
+      signals: { heuristics_only: true, note: 'LLM disabled; routed to review queue' },
+      classifier_version: CLASSIFIER_VERSION_HEURISTICS_ONLY,
+    };
+  }
   const llm = await llmClassify(track, artists);
   return { ...llm, classifier_version: CLASSIFIER_VERSION };
 }
