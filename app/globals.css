@@ -404,3 +404,132 @@ button[type="submit"] {
     align-items: flex-start;
   }
 }
+
+/* Login */
+
+.login-section {
+  max-width: 360px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.login-card {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.login-error {
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
+/* Review queue */
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.review-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-row:first-child {
+  padding-top: 0;
+}
+
+.review-row:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.review-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  flex: 1 1 280px;
+}
+
+.review-meta audio {
+  width: 100%;
+  max-width: 320px;
+  margin-top: var(--space-1);
+}
+
+.review-stats {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.review-reasoning {
+  font-style: italic;
+  color: var(--text-muted);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border);
+  font-size: 0.9rem;
+  margin: var(--space-1) 0;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.btn-authentic {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+.btn-authentic:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-brain-rot {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-brain-rot:hover {
+  filter: brightness(1.05);
+  border-color: var(--danger);
+}
+
+.review-empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: var(--space-6) var(--space-4);
+}
+
+@media (max-width: 540px) {
+  .review-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .review-actions {
+    width: 100%;
+  }
+
+  .review-actions form {
+    flex: 1 1 auto;
+  }
+
+  .review-actions .btn {
+    width: 100%;
+  }
+}

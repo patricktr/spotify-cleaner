@@ -76,6 +76,7 @@ You will need: a GitHub account, a Vercel account, a Spotify Developer app, and 
     ANTHROPIC_API_KEY          # optional; omit for heuristics-only mode
     LLM_CLASSIFIER_ENABLED     # optional; set to `false` to force heuristics-only even when the key is set
     CRON_SECRET                # 32 random bytes you generate; Vercel cron requests include it as the Authorization Bearer token
+    ADMIN_PASSWORD             # the shared password for the app-level login gate at /login
     # POSTGRES_URL, POSTGRES_URL_NON_POOLING come from the Neon integration
     ```
 
@@ -137,7 +138,6 @@ The `reviews` table also acts as a safety net: a `protect` or `keep` decision on
 
 ## Roadmap
 
-- Review UI at `/review` that renders the `review_queue` view with audio previews and thumbs-up / thumbs-down buttons that write to `reviews`.
 - Aggregate insights pages — top artists per account, listening trends from `plays`, brain-rot ingress rate over time.
 - Per-account classifier overrides — the `reviews` table already supports it (`account_id` nullable, `decision = always_unlike` exists), but the scan logic only checks `protect` / `keep` today.
 - An "undo last scan" admin action that reverts every unreverted `actions` row from the last 24 hours in one call.
