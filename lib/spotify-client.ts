@@ -92,9 +92,16 @@ async function spotifyFetch(token: string, path: string, init?: RequestInit, ret
   }
   if (res.status === 429 && retries > 0) {
     const raw = parseInt(res.headers.get('Retry-After') ?? '5', 10);
-    // Cap retry-after at 10s — Spotify will sometimes return huge values
-    // (>290s) which would burn the entire function budget on one retry.
-    const waitMs = Math.min(raw, 10) * 1000;
+    // If Spotify wants us to back off for >30s, give up on this request
+    // entirely. They penalize hard (sometimes Retry-After is in tens of
+    // thousands of seconds); waiting just burns the function budget for a
+    // request that will keep being rejected anyway. Caller handles the
+    // failure (e.g., getArtists skips and the track gets NULL primary_artist).
+    if (raw > 30) {
+      console.warn('[spotifyFetch] 429 with long Retry-After, giving up', { path, retryAfter: raw });
+      return res;
+    }
+    const waitMs = raw * 1000;
     console.warn('[spotifyFetch] 429', { path, retryAfter: raw, waitMs });
     await new Promise((r) => setTimeout(r, waitMs));
     return spotifyFetch(token, path, init, retries - 1);

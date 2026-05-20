@@ -59,15 +59,30 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
 
   // 3) Fetch and cache artist + audio-feature metadata for new tracks
   const newTrackIds = newLikes.map((lt) => lt.track.id);
-  const newArtistIds = [...new Set(newLikes.flatMap((lt) => lt.track.artists.map((a) => a.id)))];
-  console.log('[scan] need artists', { count: newArtistIds.length });
+  const referencedArtistIds = [...new Set(newLikes.flatMap((lt) => lt.track.artists.map((a) => a.id)))];
+
+  // Which artists are already cached in our DB? Skip re-fetching those.
+  const knownArtistIds = new Set<string>();
+  if (referencedArtistIds.length > 0) {
+    const existing = (await sql`
+      SELECT id FROM artists WHERE id = ANY(${referencedArtistIds})
+    `) as unknown as Array<{ id: string }>;
+    for (const row of existing) knownArtistIds.add(row.id);
+  }
+  const toFetch = referencedArtistIds.filter((id) => !knownArtistIds.has(id));
+  console.log('[scan] artists', {
+    referenced: referencedArtistIds.length,
+    cached: knownArtistIds.size,
+    toFetch: toFetch.length,
+  });
 
   const artistMap = new Map<string, SpotifyArtist>();
-  if (newArtistIds.length > 0) {
-    const artists = await getArtists(account.access_token, newArtistIds);
-    console.log('[scan] artists fetched', { fetched: artists.length, requested: newArtistIds.length });
+  if (toFetch.length > 0) {
+    const artists = await getArtists(account.access_token, toFetch);
+    console.log('[scan] artists fetched', { fetched: artists.length, requested: toFetch.length });
     for (const a of artists) {
       artistMap.set(a.id, a);
+      knownArtistIds.add(a.id);
       await sql`
         INSERT INTO artists (id, name, followers, popularity, genres, fetched_at)
         VALUES (${a.id}, ${a.name}, ${a.followers.total}, ${a.popularity}, ${a.genres}, now())
@@ -87,7 +102,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     for (const f of features) audioFeaturesMap.set(f.id, f);
   }
 
-  console.log('[scan] inserting tracks', { count: newLikes.length });
+  console.log('[scan] inserting tracks', { count: newLikes.length, artists_cached: artistMap.size });
   let trackIdx = 0;
   for (const lt of newLikes) {
     trackIdx++;
@@ -95,6 +110,12 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     const t = lt.track;
     const f = audioFeaturesMap.get(t.id);
     const releaseDate = t.album.release_date ? new Date(t.album.release_date) : null;
+    // Only set primary_artist_id if the artist actually exists in our DB
+    // (either already cached or freshly inserted this scan). Otherwise the FK
+    // constraint blocks the track insert — common when Spotify rate-limits
+    // /artists fetches and some artists never make it into the DB this run.
+    const primaryId = t.artists[0]?.id;
+    const primaryArtistId = primaryId && knownArtistIds.has(primaryId) ? primaryId : null;
     await sql`
       INSERT INTO tracks (
         id, name, artist_ids, primary_artist_id, album_id, album_name,
@@ -103,7 +124,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
         audio_features_fetched_at, fetched_at
       )
       VALUES (
-        ${t.id}, ${t.name}, ${t.artists.map((a) => a.id)}, ${t.artists[0]?.id ?? null},
+        ${t.id}, ${t.name}, ${t.artists.map((a) => a.id)}, ${primaryArtistId},
         ${t.album.id}, ${t.album.name},
         ${t.duration_ms}, ${t.explicit}, ${t.popularity}, ${releaseDate}, ${t.preview_url}, ${t.external_ids?.isrc ?? null},
         ${f?.tempo ?? null}, ${f?.energy ?? null}, ${f?.danceability ?? null},
