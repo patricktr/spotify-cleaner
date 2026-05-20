@@ -74,18 +74,30 @@ export async function getAccountWithToken(accountId: string): Promise<AccountTok
 
 const API = 'https://api.spotify.com/v1';
 
-async function spotifyFetch(token: string, path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${API}${path}`, {
-    ...init,
-    headers: {
-      ...init?.headers,
-      Authorization: `Bearer ${token}`,
-    },
-  });
-  if (res.status === 429) {
-    const retryAfter = parseInt(res.headers.get('Retry-After') ?? '5', 10);
-    await new Promise((r) => setTimeout(r, retryAfter * 1000));
-    return spotifyFetch(token, path, init);
+async function spotifyFetch(token: string, path: string, init?: RequestInit, retries = 2): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch(`${API}${path}`, {
+      ...init,
+      headers: {
+        ...init?.headers,
+        Authorization: `Bearer ${token}`,
+      },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status === 429 && retries > 0) {
+    const raw = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+    // Cap retry-after at 10s — Spotify will sometimes return huge values
+    // (>290s) which would burn the entire function budget on one retry.
+    const waitMs = Math.min(raw, 10) * 1000;
+    console.warn('[spotifyFetch] 429', { path, retryAfter: raw, waitMs });
+    await new Promise((r) => setTimeout(r, waitMs));
+    return spotifyFetch(token, path, init, retries - 1);
   }
   return res;
 }
@@ -138,9 +150,11 @@ export async function getArtists(token: string, ids: string[]): Promise<SpotifyA
   // Individual failures are logged and skipped rather than throwing,
   // so one bad artist doesn't tank an entire scan.
   const out: SpotifyArtist[] = [];
-  const CHUNK_SIZE = 10;
+  const CHUNK_SIZE = 3;
+  console.log('[getArtists] fetching', { total: ids.length, chunkSize: CHUNK_SIZE });
   for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
     const chunk = ids.slice(i, i + CHUNK_SIZE);
+    const t0 = Date.now();
     const settled = await Promise.allSettled(
       chunk.map(async (id) => {
         const res = await spotifyFetch(token, `/artists/${id}`);
@@ -148,10 +162,16 @@ export async function getArtists(token: string, ids: string[]): Promise<SpotifyA
         return (await res.json()) as SpotifyArtist;
       }),
     );
+    let ok = 0;
     for (const r of settled) {
-      if (r.status === 'fulfilled') out.push(r.value);
-      else console.warn('[getArtists] skipping artist:', r.reason instanceof Error ? r.reason.message : r.reason);
+      if (r.status === 'fulfilled') {
+        out.push(r.value);
+        ok++;
+      } else {
+        console.warn('[getArtists] skipping:', r.reason instanceof Error ? r.reason.message : r.reason);
+      }
     }
+    console.log('[getArtists] chunk done', { from: i, ok, failed: chunk.length - ok, ms: Date.now() - t0 });
   }
   return out;
 }
