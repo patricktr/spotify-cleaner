@@ -25,22 +25,28 @@ interface AccountRow {
 }
 
 export async function getAccountWithToken(accountId: string): Promise<AccountToken> {
+  console.log('[getAccount] SELECT start');
   const rows = (await sql`
     SELECT id, spotify_user_id, display_name, role, cleanup_enabled,
            refresh_token_encrypted, access_token_encrypted, access_token_expires_at
     FROM spotify_accounts
     WHERE id = ${accountId}
   `) as unknown as AccountRow[];
+  console.log('[getAccount] SELECT done', { rows: rows.length });
 
   if (rows.length === 0) throw new Error(`Account ${accountId} not found`);
   const row = rows[0];
 
+  console.log('[getAccount] decrypting');
   const refresh_token = decrypt(row.refresh_token_encrypted);
   let access_token = decrypt(row.access_token_encrypted);
   let expires_at = row.access_token_expires_at;
+  console.log('[getAccount] decrypted', { expires_at });
 
   if (expires_at.getTime() - Date.now() < 60_000) {
+    console.log('[getAccount] refreshing token');
     const refreshed = await refreshAccessToken(refresh_token);
+    console.log('[getAccount] refresh done');
     access_token = refreshed.access_token;
     expires_at = new Date(Date.now() + refreshed.expires_in * 1000);
     const newRefresh = refreshed.refresh_token ?? refresh_token;
