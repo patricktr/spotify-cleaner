@@ -39,33 +39,59 @@ export async function GET(req: NextRequest) {
     return new NextResponse('State mismatch', { status: 400 });
   }
 
-  const tokens = await exchangeCodeForTokens(code);
-  const me = await getMe(tokens.access_token);
-  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
+  try {
+    console.log('[callback] start', { role: payload.role, displayName: payload.displayName });
 
-  await sql`
-    INSERT INTO spotify_accounts (
-      display_name, role, spotify_user_id,
-      refresh_token_encrypted, access_token_encrypted, access_token_expires_at,
-      scopes, cleanup_enabled
-    )
-    VALUES (
-      ${payload.displayName}, ${payload.role}, ${me.id},
-      ${encrypt(tokens.refresh_token)}, ${encrypt(tokens.access_token)}, ${expiresAt},
-      ${tokens.scope.split(' ')}, ${payload.cleanupEnabled}
-    )
-    ON CONFLICT (spotify_user_id) DO UPDATE SET
-      display_name = EXCLUDED.display_name,
-      role = EXCLUDED.role,
-      refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
-      access_token_encrypted = EXCLUDED.access_token_encrypted,
-      access_token_expires_at = EXCLUDED.access_token_expires_at,
-      scopes = EXCLUDED.scopes,
-      cleanup_enabled = EXCLUDED.cleanup_enabled,
-      updated_at = now()
-  `;
+    const tokens = await exchangeCodeForTokens(code);
+    console.log('[callback] tokens ok', {
+      scope: tokens.scope,
+      has_refresh: !!tokens.refresh_token,
+      expires_in: tokens.expires_in,
+    });
 
-  const response = NextResponse.redirect(new URL('/', req.url));
-  response.cookies.delete('spotify_oauth');
-  return response;
+    const me = await getMe(tokens.access_token);
+    console.log('[callback] me ok', { id: me.id, display_name: me.display_name });
+
+    const expiresAt = new Date(Date.now() + tokens.expires_in * 1000);
+    const scopes = typeof tokens.scope === 'string' && tokens.scope.length > 0 ? tokens.scope.split(' ') : [];
+
+    await sql`
+      INSERT INTO spotify_accounts (
+        display_name, role, spotify_user_id,
+        refresh_token_encrypted, access_token_encrypted, access_token_expires_at,
+        scopes, cleanup_enabled
+      )
+      VALUES (
+        ${payload.displayName}, ${payload.role}, ${me.id},
+        ${encrypt(tokens.refresh_token)}, ${encrypt(tokens.access_token)}, ${expiresAt},
+        ${scopes}, ${payload.cleanupEnabled}
+      )
+      ON CONFLICT (spotify_user_id) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        role = EXCLUDED.role,
+        refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+        access_token_encrypted = EXCLUDED.access_token_encrypted,
+        access_token_expires_at = EXCLUDED.access_token_expires_at,
+        scopes = EXCLUDED.scopes,
+        cleanup_enabled = EXCLUDED.cleanup_enabled,
+        updated_at = now()
+    `;
+    console.log('[callback] db ok', { spotify_user_id: me.id });
+
+    const response = NextResponse.redirect(new URL('/', req.url));
+    response.cookies.delete('spotify_oauth');
+    return response;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[callback] failed', {
+      role: payload.role,
+      displayName: payload.displayName,
+      error: message,
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    return new NextResponse(
+      `Connect failed for ${payload.displayName} (${payload.role}): ${message}\n\nGo back to https://filter.rousseau.nyc and try again. Check Vercel runtime logs for the full stack.`,
+      { status: 500, headers: { 'content-type': 'text/plain' } },
+    );
+  }
 }
