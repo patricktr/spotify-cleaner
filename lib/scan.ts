@@ -33,10 +33,9 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     errors: [],
   };
 
-  if (!account.cleanup_enabled) {
-    result.errors.push('cleanup_enabled=false; skipping');
-    return result;
-  }
+  // Note: we proceed for ALL accounts. The auto-unlike block below is gated
+  // on account.cleanup_enabled. When cleanup is off, this becomes a dry-run
+  // that populates library_likes + classifications without writing to Spotify.
 
   // 1) Pull current Liked Songs from Spotify
   const likedTracks = await getAllLikedSongs(account.access_token);
@@ -177,7 +176,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       `) as unknown as Array<{ id: number }>;
       result.classified++;
 
-      if (c.verdict === 'brain_rot' && c.confidence >= AUTO_UNLIKE_THRESHOLD) {
+      if (account.cleanup_enabled && c.verdict === 'brain_rot' && c.confidence >= AUTO_UNLIKE_THRESHOLD) {
         // Skip if user has protected this track
         const overrides = (await sql`
           SELECT decision FROM reviews

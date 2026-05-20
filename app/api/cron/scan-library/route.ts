@@ -11,9 +11,13 @@ export async function GET(req: NextRequest) {
     return new NextResponse('Unauthorized', { status: 401 });
   }
 
+  // Scan ALL accounts with tokens — classification is decoupled from the
+  // auto-unlike action. Whether to actually unlike is gated per-account inside
+  // scanAccount() by cleanup_enabled, so disabling cleanup gives you a pure
+  // dry-run that just populates classifications + library_likes.
   const accounts = (await sql`
     SELECT id FROM spotify_accounts
-    WHERE cleanup_enabled = true AND refresh_token_encrypted IS NOT NULL
+    WHERE refresh_token_encrypted IS NOT NULL
   `) as unknown as Array<{ id: string }>;
 
   const results: Array<unknown> = [];
