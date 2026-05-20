@@ -1,3 +1,4 @@
+import { revalidatePath } from 'next/cache';
 import { sql } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -9,6 +10,22 @@ interface AccountRow {
   spotify_user_id: string | null;
   cleanup_enabled: boolean;
   created_at: Date;
+}
+
+async function toggleCleanup(formData: FormData) {
+  'use server';
+  const accountId = formData.get('account_id');
+  const enabledRaw = formData.get('enabled');
+  if (typeof accountId !== 'string' || typeof enabledRaw !== 'string') {
+    return;
+  }
+  const enabled = enabledRaw === 'true';
+  await sql`
+    UPDATE spotify_accounts
+    SET cleanup_enabled = ${enabled}, updated_at = now()
+    WHERE id = ${accountId}
+  `;
+  revalidatePath('/');
 }
 
 export default async function HomePage() {
@@ -31,11 +48,24 @@ export default async function HomePage() {
             <ul className="account-list">
               {accounts.map((a) => (
                 <li key={a.id} className="account-row">
-                  <span className="account-name">{a.display_name}</span>
-                  <span className="badge badge-role">{a.role}</span>
-                  {a.cleanup_enabled && (
-                    <span className="badge badge-cleanup">cleanup on</span>
-                  )}
+                  <div className="account-meta">
+                    <span className="account-name">{a.display_name}</span>
+                    <span className="badge badge-role">{a.role}</span>
+                    {a.cleanup_enabled && (
+                      <span className="badge badge-cleanup">cleanup on</span>
+                    )}
+                  </div>
+                  <form action={toggleCleanup} className="account-action">
+                    <input type="hidden" name="account_id" value={a.id} />
+                    <input
+                      type="hidden"
+                      name="enabled"
+                      value={a.cleanup_enabled ? 'false' : 'true'}
+                    />
+                    <button type="submit" className="btn btn-sm">
+                      {a.cleanup_enabled ? 'Disable cleanup' : 'Enable cleanup'}
+                    </button>
+                  </form>
                 </li>
               ))}
             </ul>
@@ -67,10 +97,15 @@ export default async function HomePage() {
               </select>
             </div>
 
-            <label className="field-inline">
-              <input type="checkbox" name="cleanup_enabled" value="true" />
-              Enable cleanup cron
-            </label>
+            <div className="field-checkbox">
+              <label className="field-inline">
+                <input type="checkbox" name="cleanup_enabled" value="true" />
+                Auto-unlike brain rot for this account
+              </label>
+              <p className="field-help">
+                Daily scan auto-removes high-confidence brain rot tracks. Every removal is logged and reversible.
+              </p>
+            </div>
 
             <button type="submit" className="btn btn-primary">
               Sign in with Spotify

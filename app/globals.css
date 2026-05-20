@@ -191,6 +191,7 @@ a:hover {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-3) 0;
   border-bottom: 1px solid var(--border);
@@ -203,6 +204,18 @@ a:hover {
 .account-row:last-child {
   padding-bottom: 0;
   border-bottom: none;
+}
+
+.account-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.account-action {
+  flex-shrink: 0;
 }
 
 .account-name {
@@ -261,6 +274,18 @@ a:hover {
   gap: var(--space-2);
   font-size: 0.9rem;
   color: var(--text);
+}
+
+.field-checkbox {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.field-help {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin: 0;
+  padding-left: calc(1rem + var(--space-2));
 }
 
 input[type="text"],
@@ -323,6 +348,12 @@ input[type="checkbox"] {
 
 .btn:hover {
   border-color: var(--text-dim);
+}
+
+.btn-sm {
+  min-height: 0;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
 }
 
 .btn-primary {
