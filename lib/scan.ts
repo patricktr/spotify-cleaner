@@ -176,7 +176,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       const c = await classifyTrack(lt.track, trackArtists);
       const inserted = (await sql`
         INSERT INTO classifications (track_id, verdict, confidence, classifier_version, signals)
-        VALUES (${lt.track.id}, ${c.verdict}, ${c.confidence}, ${c.classifier_version}, ${sql.json(c.signals)})
+        VALUES (${lt.track.id}, ${c.verdict}, ${c.confidence}, ${c.classifier_version}, ${JSON.stringify(c.signals)}::jsonb)
         ON CONFLICT (track_id, classifier_version) DO UPDATE SET
           verdict = EXCLUDED.verdict,
           confidence = EXCLUDED.confidence,
