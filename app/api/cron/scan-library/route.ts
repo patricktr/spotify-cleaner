@@ -15,10 +15,20 @@ export async function GET(req: NextRequest) {
   // auto-unlike action. Whether to actually unlike is gated per-account inside
   // scanAccount() by cleanup_enabled, so disabling cleanup gives you a pure
   // dry-run that just populates classifications + library_likes.
-  const accounts = (await sql`
-    SELECT id FROM spotify_accounts
-    WHERE refresh_token_encrypted IS NOT NULL
-  `) as unknown as Array<{ id: string }>;
+  //
+  // Optional ?account_id=... query param scopes the scan to a single account
+  // (useful for manual triggers — Vercel function timeout is 300s, so scanning
+  // multiple large libraries in one request can exceed it).
+  const accountIdFilter = req.nextUrl.searchParams.get('account_id');
+  const accounts = accountIdFilter
+    ? ((await sql`
+        SELECT id FROM spotify_accounts
+        WHERE id = ${accountIdFilter} AND refresh_token_encrypted IS NOT NULL
+      `) as unknown as Array<{ id: string }>)
+    : ((await sql`
+        SELECT id FROM spotify_accounts
+        WHERE refresh_token_encrypted IS NOT NULL
+      `) as unknown as Array<{ id: string }>);
 
   const results: Array<unknown> = [];
   for (const a of accounts) {
