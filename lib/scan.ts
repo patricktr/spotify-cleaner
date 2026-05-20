@@ -21,7 +21,9 @@ export interface ScanResult {
 }
 
 export async function scanAccount(accountId: string): Promise<ScanResult> {
+  console.log('[scan] start', { accountId });
   const account = await getAccountWithToken(accountId);
+  console.log('[scan] token ok', { display: account.display_name, cleanup: account.cleanup_enabled });
   const result: ScanResult = {
     accountId,
     displayName: account.display_name,
@@ -39,6 +41,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
 
   // 1) Pull current Liked Songs from Spotify
   const likedTracks = await getAllLikedSongs(account.access_token);
+  console.log('[scan] liked songs pulled', { count: likedTracks.length });
   result.totalLiked = likedTracks.length;
 
   // 2) Reconcile library_likes table
@@ -52,14 +55,17 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
   const newLikes = likedTracks.filter((lt) => !existingIds.has(lt.track.id));
   const removedIds = [...existingIds].filter((id) => !currentIds.has(id));
   result.newSinceLastScan = newLikes.length;
+  console.log('[scan] diff', { new: newLikes.length, removed: removedIds.length });
 
   // 3) Fetch and cache artist + audio-feature metadata for new tracks
   const newTrackIds = newLikes.map((lt) => lt.track.id);
   const newArtistIds = [...new Set(newLikes.flatMap((lt) => lt.track.artists.map((a) => a.id)))];
+  console.log('[scan] need artists', { count: newArtistIds.length });
 
   const artistMap = new Map<string, SpotifyArtist>();
   if (newArtistIds.length > 0) {
     const artists = await getArtists(account.access_token, newArtistIds);
+    console.log('[scan] artists fetched', { fetched: artists.length, requested: newArtistIds.length });
     for (const a of artists) {
       artistMap.set(a.id, a);
       await sql`
@@ -81,7 +87,11 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     for (const f of features) audioFeaturesMap.set(f.id, f);
   }
 
+  console.log('[scan] inserting tracks', { count: newLikes.length });
+  let trackIdx = 0;
   for (const lt of newLikes) {
+    trackIdx++;
+    if (trackIdx % 25 === 0) console.log('[scan] track insert progress', { done: trackIdx, total: newLikes.length });
     const t = lt.track;
     const f = audioFeaturesMap.get(t.id);
     const releaseDate = t.album.release_date ? new Date(t.album.release_date) : null;
