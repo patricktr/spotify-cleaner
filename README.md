@@ -81,6 +81,13 @@ You will need: a GitHub account, a Vercel account, a Spotify Developer app, and 
     - `http://localhost:3000/api/spotify/callback`
     - `https://<your-prod-domain>/api/spotify/callback`
 
+    **Then add every family member to the app's User Management allowlist** — this is the step that bites everyone the first time, with a misleading `403 user is not registered for this application` error during OAuth. New Spotify dev apps start in **Development Mode**, which restricts API access to up to 25 explicitly-listed Spotify accounts. You (the app creator) are on the list automatically; nobody else is. From your dev app's dashboard, click **User Management**, then add a row for each family member whose account you'll connect:
+
+    - **Name**: their Spotify account's display name, exactly as it appears on their profile.
+    - **Email**: the email address their Spotify account is registered under (not necessarily a Gmail; whatever they signed up with).
+
+    Save. No invitation or acceptance flow — once a Spotify account is on the list, its next OAuth attempt against your app succeeds. If you skip this step, OAuth will work for you (since you're auto-allowed) but fail for everyone else with the 403 above.
+
 5. **Get an Anthropic API key** at https://console.anthropic.com. *Optional* — if you skip this, the heuristic layer still runs and anything it can't resolve will sit in the review queue (verdict `borderline`, confidence 0.5) for you to handle by hand. You can also leave the key set but force heuristics-only mode with `LLM_CLASSIFIER_ENABLED=false`.
 
 6. **Set env vars in Vercel** (see `.env.example`):
@@ -157,7 +164,7 @@ The `reviews` table also acts as a safety net: a `protect` or `keep` decision on
 - **MusicBrainz needs ~1 second per artist.** First scan of an uncached 50-song library spends about 35 seconds inside MusicBrainz. Subsequent scans are near-instant because we don't re-fetch.
 - **MB monthly listeners and "popularity" aren't a thing.** Neither MB nor Spotify dev-mode exposes Spotify's UI-level monthly-listener counter. The classifier uses MB tags + life-span + Spotify follower count as the proxies. A few legitimate-but-tiny indie artists may get caught in the AI-slop net; mark them `keep` at `/review` and the cleaner will leave them alone going forward.
 - **Spotify Kids accounts are not supported.** The Spotify Kids app uses a separate account type that doesn't expose the standard Web API. This works for normal Spotify accounts, including Family Plan sub-accounts on the regular Spotify app.
-- **Spotify dev apps allowlist users.** Before a family member can OAuth, you must add them in the dev app's User Management section (up to 25 users in Development Mode).
+- **Development Mode caps OAuth users at 25.** Anyone you want to connect must be in the dev app's User Management list (see Setup step 4). If you'd ever want more than 25, you'd need to apply for Extended Quota Mode with Spotify.
 - **You are running this against a kid's account.** Use judgment. The classifier is opinionated. The thresholds are tunable. Watch the `actions` table for a few days before trusting it.
 - **Heuristics-only mode leans on the review queue.** Without an Anthropic API key, tracks the heuristics can't resolve land in `/review` as borderline (confidence 0.5). With MusicBrainz enrichment doing most of the heavy lifting, a typical small kid's library produces a manageable borderline list — but on larger libraries (parent accounts with hundreds of songs) expect noticeably more borderlines without LLM adjudication.
 
