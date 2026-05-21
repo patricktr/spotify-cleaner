@@ -8,7 +8,7 @@ If you have a kid with a Spotify account on your Family Plan, you've probably no
 
 ## What it does
 
-- **Multi-account from day one.** Connects up to four family members via OAuth and stores encrypted refresh tokens per account. Only accounts with `cleanup_enabled = true` get auto-unliked.
+- **Multi-account from day one.** Each family member connects via OAuth; encrypted refresh tokens are stored per account. Only accounts with `cleanup_enabled = true` get auto-unliked. The app itself has no account limit — Spotify's Development Mode cap of 25 OAuth-allowed users is the ceiling unless you apply for Extended Quota Mode.
 - **Daily library scan.** Pulls every track in Liked Songs, classifies anything new, auto-unlikes high-confidence brain rot, and writes a reversible `actions` row for every removal.
 - **Recently-played poller.** Every 30 minutes it grabs the last 50 plays for each connected account (Spotify's API ceiling) so aggregate listening data accumulates over time.
 - **Inspection UI at `/review`.** Lists every classified track across all accounts (filterable by account and verdict, sortable by confidence) with the actual signals each verdict was based on. Thumbs-up / thumbs-down buttons record your override into the `reviews` table — used both as a safety net (the cleaner respects `keep`/`protect` decisions) and as ground-truth feedback for tuning heuristic weights.

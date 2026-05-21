@@ -1,6 +1,6 @@
 -- Spotify Family Music Cleaner — schema
 --
--- Multi-account from day one (4 family members). V1 only runs the cleanup cron
+-- Multi-account from day one. V1 only runs the cleanup cron
 -- for one kid, but likes/plays tracking and aggregate insights work for any
 -- account that has granted OAuth.
 --
