@@ -795,3 +795,67 @@ button[type="submit"] {
     min-width: 0;
   }
 }
+
+/* Collapsible "Add an account" */
+
+.add-account {
+  margin-top: var(--space-4);
+}
+
+.add-account-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.4rem 0.85rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.add-account-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.add-account-toggle::before {
+  content: "+";
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+
+.add-account[open] .add-account-toggle::before {
+  content: "−";
+}
+
+.add-account-toggle:hover {
+  border-color: var(--text-dim);
+}
+
+.add-account-card {
+  margin-top: var(--space-3);
+}
+
+/* Linked account name */
+
+.account-link {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 120ms ease;
+}
+
+.account-link:hover {
+  color: var(--accent-hover);
+  border-bottom-color: var(--accent-hover);
+  text-decoration: none;
+}
+
