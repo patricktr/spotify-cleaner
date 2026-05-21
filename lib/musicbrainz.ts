@@ -98,7 +98,7 @@ export function normalizeName(name: string): string {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '') // strip combining diacritical marks
     .toLowerCase()
-    .replace(/["'`’.,!?]/g, '')
+    .replace(/["'`‘’“”.,!?]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -43,8 +43,8 @@ export interface ClassificationResult {
 // no-op gate) and adds normalized-name-match validation on MB results.
 // The DB's unique (track_id, classifier_version) lets historical rows
 // coexist; the review_queue view picks the latest by created_at.
-export const CLASSIFIER_VERSION = 'heuristics-v3.1+claude-opus-4-7';
-export const CLASSIFIER_VERSION_HEURISTICS_ONLY = 'heuristics-v3.1';
+export const CLASSIFIER_VERSION = 'heuristics-v3.2+claude-opus-4-7';
+export const CLASSIFIER_VERSION_HEURISTICS_ONLY = 'heuristics-v3.2';
 export const AUTO_UNLIKE_THRESHOLD = parseFloat(process.env.AUTO_UNLIKE_THRESHOLD ?? '0.7');
 
 export function isLlmEnabled(): boolean {
