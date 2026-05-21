@@ -6,8 +6,15 @@ import {
   getAudioFeatures,
   unlikeTracks,
 } from './spotify-client';
-import type { SpotifyArtist, SpotifyAudioFeatures } from './spotify-client';
-import { classifyTrack, AUTO_UNLIKE_THRESHOLD } from './classifier';
+import type { SpotifyAudioFeatures } from './spotify-client';
+import {
+  classifyTrack,
+  AUTO_UNLIKE_THRESHOLD,
+  CLASSIFIER_VERSION,
+  CLASSIFIER_VERSION_HEURISTICS_ONLY,
+} from './classifier';
+import type { EnrichedArtist } from './classifier';
+import { searchArtist } from './musicbrainz';
 
 export interface ScanResult {
   accountId: string;
@@ -18,6 +25,46 @@ export interface ScanResult {
   autoUnliked: number;
   queuedForReview: number;
   errors: string[];
+}
+
+interface ExistingArtistRow {
+  id: string;
+  fetched_at: Date | null;
+  mb_fetched_at: Date | null;
+}
+
+interface EnrichedArtistRow {
+  id: string;
+  name: string;
+  followers: number | null;
+  popularity: number | null;
+  genres: string[];
+  fetched_at: Date | null;
+  mb_id: string | null;
+  mb_score: number | null;
+  mb_tags: Array<{ count: number; name: string }> | null;
+  mb_country: string | null;
+  mb_type: string | null;
+  mb_begin_year: number | null;
+  mb_fetched_at: Date | null;
+}
+
+function rowToEnriched(r: EnrichedArtistRow): EnrichedArtist {
+  return {
+    id: r.id,
+    name: r.name,
+    followers: r.followers,
+    popularity: r.popularity,
+    genres: r.genres ?? [],
+    spotify_fetched: r.fetched_at != null,
+    mb_id: r.mb_id,
+    mb_score: r.mb_score,
+    mb_tags: r.mb_tags,
+    mb_country: r.mb_country,
+    mb_type: r.mb_type,
+    mb_begin_year: r.mb_begin_year,
+    mb_fetched: r.mb_fetched_at != null,
+  };
 }
 
 export async function scanAccount(accountId: string): Promise<ScanResult> {
@@ -35,87 +82,162 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     errors: [],
   };
 
-  // Note: we proceed for ALL accounts. The auto-unlike block below is gated
-  // on account.cleanup_enabled. When cleanup is off, this becomes a dry-run
-  // that populates library_likes + classifications without writing to Spotify.
-
   // 1) Pull current Liked Songs from Spotify
   const likedTracks = await getAllLikedSongs(account.access_token);
   console.log('[scan] liked songs pulled', { count: likedTracks.length });
   result.totalLiked = likedTracks.length;
 
-  // 2) Reconcile library_likes table
+  // 2) Reconcile library_likes
   const currentIds = new Set(likedTracks.map((lt) => lt.track.id));
   const existingRows = (await sql`
     SELECT track_id FROM library_likes
     WHERE account_id = ${accountId} AND removed_at IS NULL
   `) as unknown as Array<{ track_id: string }>;
   const existingIds = new Set(existingRows.map((r) => r.track_id));
-
   const newLikes = likedTracks.filter((lt) => !existingIds.has(lt.track.id));
   const removedIds = [...existingIds].filter((id) => !currentIds.has(id));
   result.newSinceLastScan = newLikes.length;
   console.log('[scan] diff', { new: newLikes.length, removed: removedIds.length });
 
-  // 3) Fetch and cache artist + audio-feature metadata for new tracks
-  const newTrackIds = newLikes.map((lt) => lt.track.id);
-  const referencedArtistIds = [...new Set(newLikes.flatMap((lt) => lt.track.artists.map((a) => a.id)))];
+  // 3) Artist handling — multi-step enrichment.
+  //
+  // We enrich every artist that's referenced either by a new like (we need
+  // them for the upcoming track INSERT's FK) OR by an existing track that
+  // needs re-classification (classifier wants the latest enrichment data).
+  // The latter case is common after a classifier-version bump: no new likes
+  // arrived, but every old track wants re-classifying with the new heuristics.
+  const fullTrackById = new Map(likedTracks.map((lt) => [lt.track.id, lt]));
 
-  // Which artists are already cached in our DB? Skip re-fetching those.
-  const knownArtistIds = new Set<string>();
-  if (referencedArtistIds.length > 0) {
-    const existing = (await sql`
-      SELECT id FROM artists WHERE id = ANY(${referencedArtistIds})
-    `) as unknown as Array<{ id: string }>;
-    for (const row of existing) knownArtistIds.add(row.id);
+  // Tracks that need classification with the current classifier version.
+  // We compute this before enrichment so we can include their artists in the
+  // enrichment set.
+  const tracksNeedingClassification = (await sql`
+    SELECT DISTINCT t.id
+    FROM library_likes ll
+    JOIN tracks t ON t.id = ll.track_id
+    WHERE ll.account_id = ${accountId} AND ll.removed_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM classifications c
+        WHERE c.track_id = t.id
+          AND c.classifier_version = ANY(${[CLASSIFIER_VERSION, CLASSIFIER_VERSION_HEURISTICS_ONLY]})
+      )
+  `) as unknown as Array<{ id: string }>;
+  console.log('[scan] tracks needing classification (pre-enrich)', { count: tracksNeedingClassification.length });
+
+  // Union: artists from new likes + artists from tracks needing classification
+  const artistIdSet = new Set<string>();
+  for (const lt of newLikes) for (const a of lt.track.artists) artistIdSet.add(a.id);
+  for (const { id } of tracksNeedingClassification) {
+    const lt = fullTrackById.get(id);
+    if (lt) for (const a of lt.track.artists) artistIdSet.add(a.id);
   }
-  const toFetch = referencedArtistIds.filter((id) => !knownArtistIds.has(id));
-  console.log('[scan] artists', {
+  const referencedArtistIds = [...artistIdSet];
+
+  // Names from /me/tracks (no API call needed) — includes both new and
+  // re-classify artists since both flow through fullTrackById/likedTracks.
+  const artistIdToName = new Map<string, string>();
+  for (const lt of likedTracks) {
+    for (const a of lt.track.artists) {
+      if (!artistIdToName.has(a.id) && a.name) artistIdToName.set(a.id, a.name);
+    }
+  }
+
+  // 3a) Check which artists already have rows + which fetches have happened
+  const preexisting = referencedArtistIds.length > 0
+    ? ((await sql`
+        SELECT id, fetched_at, mb_fetched_at
+        FROM artists WHERE id = ANY(${referencedArtistIds})
+      `) as unknown as ExistingArtistRow[])
+    : [];
+  const preexistingMap = new Map(preexisting.map((r) => [r.id, r]));
+
+  // 3b) Insert minimal rows for artists not yet in the DB
+  const newArtistIds = referencedArtistIds.filter((id) => !preexistingMap.has(id));
+  for (const aid of newArtistIds) {
+    const name = artistIdToName.get(aid) ?? '(unknown)';
+    await sql`
+      INSERT INTO artists (id, name) VALUES (${aid}, ${name})
+      ON CONFLICT (id) DO NOTHING
+    `;
+  }
+  console.log('[scan] artist rows ensured', {
     referenced: referencedArtistIds.length,
-    cached: knownArtistIds.size,
-    toFetch: toFetch.length,
+    preexisting: preexistingMap.size,
+    inserted: newArtistIds.length,
   });
 
-  const artistMap = new Map<string, SpotifyArtist>();
-  if (toFetch.length > 0) {
-    const artists = await getArtists(account.access_token, toFetch);
-    console.log('[scan] artists fetched', { fetched: artists.length, requested: toFetch.length });
-    for (const a of artists) {
-      artistMap.set(a.id, a);
-      knownArtistIds.add(a.id);
+  // 3c) Try Spotify enrichment for artists missing it. This may fail with 429
+  //     under dev-mode rate limits — that's fine, MusicBrainz fills the gap.
+  const needSpotify = referencedArtistIds.filter((id) => !preexistingMap.get(id)?.fetched_at);
+  if (needSpotify.length > 0) {
+    console.log('[scan] spotify enrichment', { needed: needSpotify.length });
+    const spotifyArtists = await getArtists(account.access_token, needSpotify);
+    console.log('[scan] spotify enriched', { fetched: spotifyArtists.length, requested: needSpotify.length });
+    for (const a of spotifyArtists) {
       await sql`
-        INSERT INTO artists (id, name, followers, popularity, genres, fetched_at)
-        VALUES (${a.id}, ${a.name}, ${a.followers.total}, ${a.popularity}, ${a.genres}, now())
-        ON CONFLICT (id) DO UPDATE SET
-          name = EXCLUDED.name,
-          followers = EXCLUDED.followers,
-          popularity = EXCLUDED.popularity,
-          genres = EXCLUDED.genres,
-          fetched_at = now()
+        UPDATE artists
+        SET name = ${a.name},
+            followers = ${a.followers.total},
+            popularity = ${a.popularity},
+            genres = ${a.genres},
+            fetched_at = now()
+        WHERE id = ${a.id}
       `;
     }
   }
 
+  // 3d) MusicBrainz enrichment for artists missing it. Sequential (1 req/s),
+  //     so this dominates the scan time on a cold artist cache.
+  const needMb = referencedArtistIds.filter((id) => !preexistingMap.get(id)?.mb_fetched_at);
+  if (needMb.length > 0) {
+    console.log('[scan] musicbrainz enrichment', { needed: needMb.length });
+    let mbHits = 0;
+    for (const aid of needMb) {
+      const name = artistIdToName.get(aid);
+      if (!name) continue;
+      try {
+        const mb = await searchArtist(name);
+        if (mb) mbHits++;
+        await sql`
+          UPDATE artists
+          SET mb_id = ${mb?.mb_id ?? null},
+              mb_score = ${mb?.score ?? null},
+              mb_tags = ${mb ? JSON.stringify(mb.tags) : null}::jsonb,
+              mb_country = ${mb?.country ?? null},
+              mb_type = ${mb?.type ?? null},
+              mb_begin_year = ${mb?.begin_year ?? null},
+              mb_ended = ${mb?.ended ?? null},
+              mb_fetched_at = now()
+          WHERE id = ${aid}
+        `;
+      } catch (e) {
+        console.warn('[scan] mb error', { aid, name, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    console.log('[scan] musicbrainz enriched', { matched: mbHits, attempted: needMb.length });
+  }
+
+  // 4) Audio features (stubbed to []; dev-mode 403). Insert tracks.
+  const newTrackIds = newLikes.map((lt) => lt.track.id);
   const audioFeaturesMap = new Map<string, SpotifyAudioFeatures>();
   if (newTrackIds.length > 0) {
     const features = await getAudioFeatures(account.access_token, newTrackIds);
     for (const f of features) audioFeaturesMap.set(f.id, f);
   }
 
-  console.log('[scan] inserting tracks', { count: newLikes.length, artists_cached: artistMap.size });
+  console.log('[scan] inserting tracks', { count: newLikes.length });
   let trackIdx = 0;
   for (const lt of newLikes) {
     trackIdx++;
-    if (trackIdx % 25 === 0) console.log('[scan] track insert progress', { done: trackIdx, total: newLikes.length });
+    if (trackIdx % 25 === 0) {
+      console.log('[scan] track insert progress', { done: trackIdx, total: newLikes.length });
+    }
     const t = lt.track;
     const f = audioFeaturesMap.get(t.id);
     const releaseDate = t.album.release_date ? new Date(t.album.release_date) : null;
-    // Only set primary_artist_id if the artist actually exists in our DB
-    // (either already cached or freshly inserted this scan). Otherwise the FK
-    // constraint blocks the track insert — common when Spotify rate-limits
-    // /artists fetches and some artists never make it into the DB this run.
-    const primaryId = t.artists[0]?.id;
-    const primaryArtistId = primaryId && knownArtistIds.has(primaryId) ? primaryId : null;
+    // primary_artist_id is now always safe — every referenced artist has a row
+    // (minimal-or-enriched).
+    const primaryArtistId = t.artists[0]?.id ?? null;
     await sql`
       INSERT INTO tracks (
         id, name, artist_ids, primary_artist_id, album_id, album_name,
@@ -151,48 +273,27 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     `;
   }
 
-  // 4) Classify tracks without a classification yet (within this account's active likes)
-  const trackIdsToClassify = (await sql`
-    SELECT DISTINCT t.id
-    FROM library_likes ll
-    JOIN tracks t ON t.id = ll.track_id
-    WHERE ll.account_id = ${accountId} AND ll.removed_at IS NULL
-      AND NOT EXISTS (SELECT 1 FROM classifications c WHERE c.track_id = t.id)
-  `) as unknown as Array<{ id: string }>;
+  // 5) Classify. tracksNeedingClassification was computed earlier (before
+  //    enrichment). Now load enriched artist data and run the classifier.
+  console.log('[scan] classifying', { count: tracksNeedingClassification.length });
 
-  const idsToClassifySet = new Set(trackIdsToClassify.map((r) => r.id));
-  const fullTrackById = new Map(likedTracks.map((lt) => [lt.track.id, lt]));
+  const enrichedMap = new Map<string, EnrichedArtist>();
+  if (referencedArtistIds.length > 0) {
+    const rows = (await sql`
+      SELECT id, name, followers, popularity, genres, fetched_at,
+             mb_id, mb_score, mb_tags, mb_country, mb_type, mb_begin_year, mb_fetched_at
+      FROM artists WHERE id = ANY(${referencedArtistIds})
+    `) as unknown as EnrichedArtistRow[];
+    for (const r of rows) enrichedMap.set(r.id, rowToEnriched(r));
+  }
 
-  for (const { id } of trackIdsToClassify) {
+  for (const { id } of tracksNeedingClassification) {
     const lt = fullTrackById.get(id);
-    if (!lt) continue; // shouldn't happen — only classify tracks currently in Liked Songs
+    if (!lt) continue;
     try {
       const trackArtists = lt.track.artists
-        .map((a) => artistMap.get(a.id))
-        .filter((a): a is SpotifyArtist => a !== undefined);
-
-      // If artists weren't fetched this scan (already in DB), pull from DB cache
-      if (trackArtists.length === 0 && lt.track.artists.length > 0) {
-        const cached = (await sql`
-          SELECT id, name, followers, popularity, genres
-          FROM artists WHERE id = ANY(${lt.track.artists.map((a) => a.id)})
-        `) as unknown as Array<{
-          id: string;
-          name: string;
-          followers: number;
-          popularity: number;
-          genres: string[];
-        }>;
-        for (const c of cached) {
-          trackArtists.push({
-            id: c.id,
-            name: c.name,
-            followers: { total: c.followers },
-            popularity: c.popularity,
-            genres: c.genres,
-          });
-        }
-      }
+        .map((a) => enrichedMap.get(a.id))
+        .filter((a): a is EnrichedArtist => a !== undefined);
 
       const c = await classifyTrack(lt.track, trackArtists);
       const inserted = (await sql`
@@ -208,7 +309,6 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       result.classified++;
 
       if (account.cleanup_enabled && c.verdict === 'brain_rot' && c.confidence >= AUTO_UNLIKE_THRESHOLD) {
-        // Skip if user has protected this track
         const overrides = (await sql`
           SELECT decision FROM reviews
           WHERE track_id = ${lt.track.id}
@@ -237,9 +337,6 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       result.errors.push(`${lt.track.id} "${lt.track.name}": ${msg}`);
     }
   }
-
-  // Suppress unused-var warning for now
-  void idsToClassifySet;
 
   return result;
 }

@@ -38,12 +38,24 @@ create index spotify_accounts_role_idx on spotify_accounts(role);
 create table artists (
   id text primary key,
   name text not null,
+  -- Spotify fields (nullable; populated when /artists/{id} succeeds)
   followers integer,
   popularity integer,
   genres text[] not null default '{}',
-  fetched_at timestamptz not null default now()
+  fetched_at timestamptz,
+  -- MusicBrainz fields (nullable; populated when MB search succeeds)
+  mb_id text,
+  mb_score integer,
+  mb_tags jsonb,
+  mb_country text,
+  mb_type text,
+  mb_begin_year integer,
+  mb_ended boolean,
+  mb_fetched_at timestamptz,
+  created_at timestamptz not null default now()
 );
 create index artists_followers_idx on artists(followers);
+create index artists_mb_id_idx on artists(mb_id) where mb_id is not null;
 
 create table tracks (
   id text primary key,
