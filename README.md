@@ -11,28 +11,45 @@ If you have a kid with a Spotify account on your Family Plan, you've probably no
 - **Multi-account from day one.** Connects up to four family members via OAuth and stores encrypted refresh tokens per account. Only accounts with `cleanup_enabled = true` get auto-unliked.
 - **Daily library scan.** Pulls every track in Liked Songs, classifies anything new, auto-unlikes high-confidence brain rot, and writes a reversible `actions` row for every removal.
 - **Recently-played poller.** Every 30 minutes it grabs the last 50 plays for each connected account (Spotify's API ceiling) so aggregate listening data accumulates over time.
-- **Review queue.** Borderline tracks and low-confidence brain rot land in a `review_queue` view for thumbs-up / thumbs-down decisions per account. Decisions are stored in a `reviews` table and respected on the next scan.
+- **Inspection UI at `/review`.** Lists every classified track across all accounts (filterable by account and verdict, sortable by confidence) with the actual signals each verdict was based on. Thumbs-up / thumbs-down buttons record your override into the `reviews` table — used both as a safety net (the cleaner respects `keep`/`protect` decisions) and as ground-truth feedback for tuning heuristic weights.
+- **Password-gated dashboard.** The whole admin UI sits behind a single shared password (`ADMIN_PASSWORD`), enforced by edge middleware. Cron endpoints and the Spotify OAuth callback are allowlisted so they keep working.
 
 ## How classification works
 
-The classifier in `lib/classifier.ts` is heuristics-first, LLM-on-the-edge. Most tracks never hit Claude.
+The classifier in `lib/classifier.ts` is heuristics-first, LLM-on-the-edge. Most tracks never hit Claude. Each scanned artist is enriched from two data sources before classification:
 
-**Hard heuristics (in order):**
+1. **Spotify Web API** — track name, artist name, album, release date. Track popularity, `preview_url`, and the entire `/audio-features` endpoint are stripped from dev-mode apps as of November 2024, so we don't rely on them. The `/artists/{id}` lookup gives us follower count, popularity, and genre tags when we can reach it (Spotify rate-limits this hard in dev mode).
+2. **[MusicBrainz Web Service v2](https://musicbrainz.org/doc/MusicBrainz_API)** — free, no auth, paced at 1 request/second per their ToS. Returns artist `id`, name, type (`Person` / `Group` / `Other`), country, life-span (`begin` and `end` years), and folksonomy tags. MusicBrainz is human-curated, so "is this artist in MB at all, with a matching name and a non-trivial cataloging footprint" is a strong proxy for "is this a real artist."
 
-1. **Toilet-humor title regex** — `poop / poo / fart / pee-pee / booger / tinkle / toot / stinky / tushy` in the track name. Verdict: `brain_rot`, confidence 0.95.
-2. **AI-slop pattern** — primary artist has fewer than 5,000 followers, the track was released within the last 12 months, and track popularity is under 20. Verdict: `brain_rot`, confidence 0.92.
-3. **Known brain-rot genres** — primary artist tagged with `phonk`, `sigma`, `skibidi`, `gachi`, `brainrot`, `rage rap`, or `tiktok rap`. Verdict: `brain_rot`, confidence 0.85.
-4. **Mega-artist or high-popularity** — track popularity >= 70, or primary artist has more than 5 million followers. Verdict: `authentic`, confidence ~0.9.
+**Hard heuristics, in priority order:**
 
-**Everything else** goes to Claude `opus-4-7` with a cached system prompt that bakes in:
+| Heuristic | Verdict | Confidence | Requires |
+| --- | --- | --- | --- |
+| Toilet-humor regex in track name (`poop / fart / butt / pee-pee / booger / tinkle / toot / stinky / tushy`) | `brain_rot` | 0.95 | track name only |
+| Brain-rot tag from Spotify (`phonk`, `sigma`, `skibidi`, `gachi`, `brainrot`, `rage rap`, `tiktok rap`) | `brain_rot` | 0.9 | Spotify artist genres |
+| Brain-rot tag from MusicBrainz (same list) | `brain_rot` | 0.88 | MB tags |
+| Mega-artist on Spotify (followers > 5M) | `authentic` | 0.92 | Spotify follower count |
+| Established artist in MB: normalized name match + cataloged `begin_year` + 5+ years active. Confidence 0.9 with 5+ tags, 0.8 otherwise. | `authentic` | 0.8–0.9 | MB name match + life-span |
+| AI-slop strong: Spotify followers < 5k, released in last 12 months, MB has no name match | `brain_rot` | 0.9 | Spotify followers + release date + MB result |
+| AI-slop partial: Spotify followers < 5k, released in last 12 months (MB inconclusive) | `brain_rot` | 0.75 | Spotify followers + release date |
+| Cataloged artist in MB: name match + `Person`/`Group` + ≥1 tag (but no life-span) | `authentic` | 0.65 | MB name match + tags |
+| Obscure + no MB match: Spotify followers < 50k AND MB name mismatch | `brain_rot` | 0.7 | Spotify followers + MB result |
+| Weak MB match: name match but no tags, no life-span | falls through | — | — |
 
-- Anchor examples that are always authentic regardless of taste: The Beatles, Queen, P!nk, Weird Al Yankovic, Talking Heads, Backstreet Boys, Mozart, Bach, any classical composer, anything that has ever charted on the Billboard Hot 100.
+**Everything that falls through** goes to Claude `opus-4-7` (when `ANTHROPIC_API_KEY` is set) with a cached system prompt that bakes in:
+
+- Anchor artists that are always authentic regardless of taste: The Beatles, Queen, P!nk, Weird Al Yankovic, Talking Heads, Backstreet Boys, Mozart, Bach, any classical composer, anything that has ever charted on the Billboard Hot 100.
 - Explicit lyrics are orthogonal to the judgment — `fuck` in a Pink song is not brain rot.
 - The target is *dopamine-optimized algorithmic bait*, not "music I don't like." A real-but-obscure deep cut leans authentic.
+- Claude sees the full enriched artist payload, including a `musicbrainz_name_matches_spotify` boolean computed from a normalized comparison (strips diacritics, lowercase, drops common punctuation including both straight and curly quote marks).
 
 The system prompt is sent with `cache_control: ephemeral`, so per-request cost stays low once the cache warms.
 
-Heuristics-only mode is a supported configuration: leave `ANTHROPIC_API_KEY` unset (or set `LLM_CLASSIFIER_ENABLED=false`) and the heuristic layer runs as usual, with everything it can't resolve queued as `borderline` for manual review instead of being sent to Claude.
+**Heuristics-only mode is a supported configuration:** leave `ANTHROPIC_API_KEY` unset (or set `LLM_CLASSIFIER_ENABLED=false`) and the heuristic layer runs as usual, with anything it can't resolve queued as `borderline` (confidence 0.5) for manual review at `/review`.
+
+### Note: MusicBrainz's `score` is decorative
+
+The classifier stores `mb_score` for diagnostics but **does not gate** on it. Lucene normalizes the top result of any search to 100, even for terrible matches — searching `artist:"Poopers the Magic Penguin"` returns "Rie Sinclair" at score 100. The real match-quality signal is a normalized comparison of the MB-returned name against the artist name we searched for. Only a name match counts as an MB hit.
 
 ## Setup
 
@@ -107,13 +124,19 @@ Schedules are defined in `vercel.json`:
 | Path | Schedule | What it does |
 | --- | --- | --- |
 | `/api/cron/poll-plays` | `*/30 * * * *` | Every 30 minutes. Pulls the last 50 plays for every connected account into the `plays` table. |
-| `/api/cron/scan-library` | `0 4 * * *` | Daily at 04:00 UTC. Reconciles Liked Songs, classifies new tracks, auto-unlikes high-confidence brain rot, queues borderline tracks. |
+| `/api/cron/scan-library` | `0 4 * * *` | Daily at 04:00 UTC. For every account with a stored refresh token: reconciles Liked Songs, enriches new artists via Spotify + MusicBrainz, classifies anything lacking a current-version row. Auto-unlikes brain rot only for accounts with `cleanup_enabled = true`. |
 
-Both endpoints reject any request whose `Authorization` header isn't `Bearer $CRON_SECRET`. To trigger manually:
+Both endpoints reject any request whose `Authorization` header isn't `Bearer $CRON_SECRET`. To trigger manually for a single account (useful when iterating on the classifier, since MusicBrainz rate-limiting means a full scan of an uncached library takes about 1.1 seconds per unique artist):
 
 ```sh
+# All accounts
 curl -H "Authorization: Bearer $CRON_SECRET" https://<your-prod-domain>/api/cron/scan-library
+
+# Just one account
+curl -H "Authorization: Bearer $CRON_SECRET" "https://<your-prod-domain>/api/cron/scan-library?account_id=<uuid>"
 ```
+
+`/api/cron/ping` is a diagnostic endpoint that runs a single `SELECT 1` against the database and reports the round-trip latency.
 
 ## Aggressiveness and reversibility
 
@@ -129,18 +152,23 @@ The `reviews` table also acts as a safety net: a `protect` or `keep` decision on
 
 ## Caveats
 
-- **Monthly listeners isn't a thing in the API.** Spotify's public API does not expose the "X monthly listeners" number you see in the app. The classifier uses artist follower count and track popularity as the closest proxies. These are correlated but not identical — a few legitimate-but-tiny indie artists may get caught in the AI-slop net.
-- **Spotify Kids accounts are not supported.** The Spotify Kids app uses a separate account type that doesn't expose the standard Web API. This only works for normal Spotify accounts, including Family Plan sub-accounts on the regular Spotify app.
-- **The review UI isn't built yet.** The `review_queue` view is populated and the `reviews` table accepts decisions, but you'd currently have to interact with it via SQL or build your own page. See Roadmap.
-- **The admin dashboard isn't authenticated.** Right now, anyone who knows your production URL can see the account list and trigger an OAuth connect. Lock it down with [Vercel Deployment Protection](https://vercel.com/docs/deployment-protection) (Standard / Password Protection) before going public.
+- **Spotify dev-mode strips a lot.** Track `popularity` and `preview_url` are not returned from `/me/tracks` for apps in Development Mode. `/audio-features` returns 403. `/artists?ids=` (batched) returns 403; we work around it by calling `/artists/{id}` per-ID with parallel chunks and tolerating per-request failures. To get any of that back, you'd need to apply for Extended Quota Mode with Spotify (multi-week review).
+- **Spotify rate-limits get unforgiving.** A single bad batch of artist fetches can earn you a `Retry-After: 80000+` for hours. The fetch wrapper caps retries at 30s and gives up after that rather than burning the function budget.
+- **MusicBrainz needs ~1 second per artist.** First scan of an uncached 50-song library spends about 35 seconds inside MusicBrainz. Subsequent scans are near-instant because we don't re-fetch.
+- **MB monthly listeners and "popularity" aren't a thing.** Neither MB nor Spotify dev-mode exposes Spotify's UI-level monthly-listener counter. The classifier uses MB tags + life-span + Spotify follower count as the proxies. A few legitimate-but-tiny indie artists may get caught in the AI-slop net; mark them `keep` at `/review` and the cleaner will leave them alone going forward.
+- **Spotify Kids accounts are not supported.** The Spotify Kids app uses a separate account type that doesn't expose the standard Web API. This works for normal Spotify accounts, including Family Plan sub-accounts on the regular Spotify app.
+- **Spotify dev apps allowlist users.** Before a family member can OAuth, you must add them in the dev app's User Management section (up to 25 users in Development Mode).
 - **You are running this against a kid's account.** Use judgment. The classifier is opinionated. The thresholds are tunable. Watch the `actions` table for a few days before trusting it.
-- **Heuristics-only mode leans on the review queue.** If you run without an Anthropic API key (or with `LLM_CLASSIFIER_ENABLED=false`), every track the heuristics can't resolve is queued as `borderline` instead of being judged by Claude. Expect a larger review backlog — manageable once the review UI ships, painful via raw SQL today.
+- **Heuristics-only mode leans on the review queue.** Without an Anthropic API key, tracks the heuristics can't resolve land in `/review` as borderline (confidence 0.5). With MusicBrainz enrichment doing most of the heavy lifting, a typical small kid's library produces a manageable borderline list — but on larger libraries (parent accounts with hundreds of songs) expect noticeably more borderlines without LLM adjudication.
 
 ## Roadmap
 
-- Aggregate insights pages — top artists per account, listening trends from `plays`, brain-rot ingress rate over time.
-- Per-account classifier overrides — the `reviews` table already supports it (`account_id` nullable, `decision = always_unlike` exists), but the scan logic only checks `protect` / `keep` today.
-- An "undo last scan" admin action that reverts every unreverted `actions` row from the last 24 hours in one call.
+- **Artist-level "trusted" overrides.** If you mark any track from artist X as `keep` at `/review`, treat all of X's other tracks as authentic-leaning. The `reviews` table already supports a nullable `account_id` for global overrides, which is the natural home for this.
+- **Feedback-driven heuristic tuning.** Once enough reviews accumulate, compare heuristic verdicts to the recorded ground-truth decisions and report per-rule precision/recall. Use that to bump or demote individual rule confidences without guesswork.
+- **Aggregate insights pages.** Top artists per account, listening trends from `plays`, brain-rot ingress rate over time, "tracks classified brain rot before vs. after we tightened the AI-slop rule."
+- **Per-account classifier overrides beyond `keep` / `protect`.** The `reviews` table supports `always_unlike`; the scan logic doesn't honor it yet.
+- **An "undo last scan" admin action** that reverts every unreverted `actions` row from the last 24 hours in one call.
+- **Extended Quota Mode application** — if the dev-mode tax (no track popularity, no preview URL, no audio features) becomes a meaningful classifier ceiling, apply with Spotify to lift it.
 
 ## License
 
