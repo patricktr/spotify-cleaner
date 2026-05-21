@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { revalidatePath } from 'next/cache';
 import { sql } from '@/lib/db';
 
@@ -70,6 +71,11 @@ export default async function HomePage() {
               ))}
             </ul>
           )}
+          <p className="card-link-row">
+            <Link href="/review" prefetch={false} className="card-link">
+              Review classifications →
+            </Link>
+          </p>
         </div>
       </section>
 
