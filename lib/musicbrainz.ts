@@ -9,7 +9,8 @@ const USER_AGENT = 'spotify-cleaner/0.1 (https://github.com/patricktr/spotify-cl
 
 export interface MBArtistMatch {
   mb_id: string;
-  score: number;
+  name: string; // The name MB returned. Compare to the search query to gauge match quality.
+  score: number; // Lucene relevance score — kept for diagnostics. NOT a match-quality signal: MB normalizes the top result to 100 even on weak matches, so always validate via name comparison.
   tags: Array<{ count: number; name: string }>;
   country: string | null;
   type: string | null;
@@ -29,6 +30,7 @@ async function paceRequest(): Promise<void> {
 
 interface RawMBArtist {
   id: string;
+  name: string;
   score: number;
   type?: string;
   country?: string;
@@ -76,6 +78,7 @@ export async function searchArtist(name: string): Promise<MBArtistMatch | null> 
 
   return {
     mb_id: top.id,
+    name: top.name,
     score: top.score,
     tags: top.tags ?? [],
     country: top.country ?? null,
@@ -83,4 +86,19 @@ export async function searchArtist(name: string): Promise<MBArtistMatch | null> 
     begin_year: Number.isFinite(beginYear) ? beginYear : null,
     ended: top['life-span']?.ended ?? null,
   };
+}
+
+/**
+ * Normalize an artist name for comparison: lowercase, strip diacritics,
+ * collapse whitespace, drop common punctuation. Used to decide whether a
+ * MusicBrainz result actually matches the artist we searched for.
+ */
+export function normalizeName(name: string): string {
+  return name
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // strip combining diacritical marks
+    .toLowerCase()
+    .replace(/["'`’.,!?]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }

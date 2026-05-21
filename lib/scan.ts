@@ -41,6 +41,7 @@ interface EnrichedArtistRow {
   genres: string[];
   fetched_at: Date | null;
   mb_id: string | null;
+  mb_name: string | null;
   mb_score: number | null;
   mb_tags: Array<{ count: number; name: string }> | null;
   mb_country: string | null;
@@ -58,6 +59,7 @@ function rowToEnriched(r: EnrichedArtistRow): EnrichedArtist {
     genres: r.genres ?? [],
     spotify_fetched: r.fetched_at != null,
     mb_id: r.mb_id,
+    mb_name: r.mb_name,
     mb_score: r.mb_score,
     mb_tags: r.mb_tags,
     mb_country: r.mb_country,
@@ -201,6 +203,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
         await sql`
           UPDATE artists
           SET mb_id = ${mb?.mb_id ?? null},
+              mb_name = ${mb?.name ?? null},
               mb_score = ${mb?.score ?? null},
               mb_tags = ${mb ? JSON.stringify(mb.tags) : null}::jsonb,
               mb_country = ${mb?.country ?? null},
@@ -281,7 +284,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
   if (referencedArtistIds.length > 0) {
     const rows = (await sql`
       SELECT id, name, followers, popularity, genres, fetched_at,
-             mb_id, mb_score, mb_tags, mb_country, mb_type, mb_begin_year, mb_fetched_at
+             mb_id, mb_name, mb_score, mb_tags, mb_country, mb_type, mb_begin_year, mb_fetched_at
       FROM artists WHERE id = ANY(${referencedArtistIds})
     `) as unknown as EnrichedArtistRow[];
     for (const r of rows) enrichedMap.set(r.id, rowToEnriched(r));

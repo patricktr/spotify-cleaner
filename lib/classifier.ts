@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { SpotifyTrack } from './spotify-client';
+import { normalizeName } from './musicbrainz';
 
 export type Verdict = 'authentic' | 'brain_rot' | 'borderline';
 
@@ -17,7 +18,8 @@ export interface EnrichedArtist {
   spotify_fetched: boolean;
   // MusicBrainz (mb_id null when no match found; mb_fetched=true means we tried)
   mb_id: string | null;
-  mb_score: number | null;
+  mb_name: string | null; // the artist name MB returned (used to validate the match)
+  mb_score: number | null; // Lucene relevance, normalized — kept only for diagnostics, NOT used by heuristics
   mb_tags: Array<{ count: number; name: string }> | null;
   mb_country: string | null;
   mb_type: string | null;
@@ -37,11 +39,12 @@ export interface ClassificationResult {
   };
 }
 
-// Bumped to v2 for the MusicBrainz-aware heuristic stack. The DB's
-// unique (track_id, classifier_version) lets v1 and v2 rows coexist;
-// the review_queue view picks the latest by created_at.
-export const CLASSIFIER_VERSION = 'heuristics-v2+claude-opus-4-7';
-export const CLASSIFIER_VERSION_HEURISTICS_ONLY = 'heuristics-v2';
+// v3: drops mb_score (Lucene normalizes top result to 100, so it was a
+// no-op gate) and adds normalized-name-match validation on MB results.
+// The DB's unique (track_id, classifier_version) lets historical rows
+// coexist; the review_queue view picks the latest by created_at.
+export const CLASSIFIER_VERSION = 'heuristics-v3+claude-opus-4-7';
+export const CLASSIFIER_VERSION_HEURISTICS_ONLY = 'heuristics-v3';
 export const AUTO_UNLIKE_THRESHOLD = parseFloat(process.env.AUTO_UNLIKE_THRESHOLD ?? '0.7');
 
 export function isLlmEnabled(): boolean {
@@ -67,6 +70,25 @@ const BRAIN_ROT_GENRES = new Set([
 
 function matchBrainRotTags(tags: Array<{ name: string }>): string[] {
   return tags.filter((t) => BRAIN_ROT_GENRES.has(t.name.toLowerCase())).map((t) => t.name);
+}
+
+/**
+ * True iff MB returned a row AND the name it returned matches (normalized)
+ * the artist name we searched for. mb_score alone is meaningless — see the
+ * EnrichedArtist field comment. A name match is the real signal.
+ */
+function mbNameMatches(a: EnrichedArtist): boolean {
+  if (!a.mb_id || !a.mb_name) return false;
+  return normalizeName(a.name) === normalizeName(a.mb_name);
+}
+
+/**
+ * Indicates we tried MB and the returned row (if any) doesn't match the
+ * artist name we asked about. Useful as a negative signal: a low-follower
+ * Spotify artist who isn't cataloged in MB is a strong AI-slop tell.
+ */
+function mbAttemptedAndMissed(a: EnrichedArtist): boolean {
+  return a.mb_fetched && !mbNameMatches(a);
 }
 
 function hardHeuristics(
@@ -110,14 +132,17 @@ function hardHeuristics(
     return { verdict: 'authentic', confidence: 0.92, signals: { heuristics: signals } };
   }
 
-  // Established artist in MusicBrainz — perfect score + been around 5+ years
-  if (primary?.mb_score != null && primary.mb_score >= 90 && primary.mb_begin_year != null) {
+  // Established artist: MB has a name match AND a cataloged life-span AND
+  // they've been around 5+ years. Tag count adds confidence.
+  if (primary && mbNameMatches(primary) && primary.mb_begin_year != null) {
     const yearsActive = currentYear - primary.mb_begin_year;
+    const tagCount = primary.mb_tags?.length ?? 0;
     if (yearsActive >= 5) {
+      const confidence = tagCount >= 5 ? 0.9 : 0.8;
       signals.push(
-        `established_artist: mb_score=${primary.mb_score}, years_active=${yearsActive}, type=${primary.mb_type ?? 'n/a'}`,
+        `established_artist: name_match, begin_year=${primary.mb_begin_year}, years_active=${yearsActive}, tags=${tagCount}, type=${primary.mb_type ?? 'n/a'}`,
       );
-      return { verdict: 'authentic', confidence: 0.85, signals: { heuristics: signals } };
+      return { verdict: 'authentic', confidence, signals: { heuristics: signals } };
     }
   }
 
@@ -129,17 +154,16 @@ function hardHeuristics(
 
   // === MEDIUM CONFIDENCE SIGNALS ===
 
-  // AI-slop pattern: tiny Spotify followers + recent release. Stronger when
-  // MusicBrainz also doesn't know the artist (we attempted and got nothing).
+  // AI-slop pattern: tiny Spotify followers + recent release. Strongest when
+  // MusicBrainz also can't find the artist by name.
   if (primary?.followers != null && primary.followers < 5000) {
     const released = track.album.release_date ? new Date(track.album.release_date) : null;
     if (released) {
       const ageMonths = (Date.now() - released.getTime()) / (1000 * 60 * 60 * 24 * 30);
       if (ageMonths < 12) {
-        const mbAttemptedAndMissed = primary.mb_fetched && !primary.mb_id;
-        if (mbAttemptedAndMissed) {
+        if (primary && mbAttemptedAndMissed(primary)) {
           signals.push(
-            `ai_slop_strong: followers=${primary.followers}, age_mo=${ageMonths.toFixed(1)}, not_in_mb`,
+            `ai_slop_strong: followers=${primary.followers}, age_mo=${ageMonths.toFixed(1)}, no_mb_name_match`,
           );
           return { verdict: 'brain_rot', confidence: 0.9, signals: { heuristics: signals } };
         }
@@ -149,25 +173,33 @@ function hardHeuristics(
     }
   }
 
-  // In MusicBrainz with confident match — authentic-leaning
-  if (primary?.mb_id && primary.mb_score != null && primary.mb_score >= 90) {
-    signals.push(`in_musicbrainz_high: mb_score=${primary.mb_score}`);
-    return { verdict: 'authentic', confidence: 0.78, signals: { heuristics: signals } };
+  // Cataloged in MB with a name match (but no begin_year). Weaker than
+  // established_artist — could be a real but obscure artist (Bryant Oden,
+  // Captainsparklez, Tobuscus etc.). Lean cautiously authentic.
+  if (primary && mbNameMatches(primary)) {
+    const tagCount = primary.mb_tags?.length ?? 0;
+    const hasBeginYear = primary.mb_begin_year != null;
+    const typeIsPersonOrGroup = primary.mb_type === 'Person' || primary.mb_type === 'Group';
+    // Build a tiered confidence based on cataloging quality
+    if (typeIsPersonOrGroup && tagCount >= 1) {
+      signals.push(`cataloged_artist: name_match, type=${primary.mb_type}, tags=${tagCount}, begin_year=${hasBeginYear ? primary.mb_begin_year : 'unknown'}`);
+      return { verdict: 'authentic', confidence: 0.65, signals: { heuristics: signals } };
+    }
+    // Name matches but minimal supporting info — borderline-leaning. Let it
+    // fall through and become a real borderline (or hit LLM if enabled).
+    signals.push(`weak_mb_match: name_match, type=${primary.mb_type ?? 'n/a'}, tags=${tagCount}, no_begin_year`);
+    // Don't return — fall through to borderline below.
   }
 
-  if (primary?.mb_id && primary.mb_score != null && primary.mb_score >= 80) {
-    signals.push(`in_musicbrainz_low: mb_score=${primary.mb_score}`);
-    return { verdict: 'authentic', confidence: 0.65, signals: { heuristics: signals } };
-  }
-
-  // Not in MusicBrainz at all + low Spotify followers = suspicious
+  // Spotify followers known to be low AND MB couldn't match the name —
+  // strong suspicion of an obscure-to-the-point-of-not-real artist.
   if (
-    primary?.mb_fetched &&
-    !primary.mb_id &&
+    primary &&
+    mbAttemptedAndMissed(primary) &&
     primary.followers != null &&
     primary.followers < 50_000
   ) {
-    signals.push(`obscure_no_mb: spotify_followers=${primary.followers}`);
+    signals.push(`obscure_no_mb_match: spotify_followers=${primary.followers}`);
     return { verdict: 'brain_rot', confidence: 0.7, signals: { heuristics: signals } };
   }
 
@@ -214,7 +246,8 @@ async function llmClassify(
       spotify_popularity: a.popularity,
       spotify_genres: a.genres,
       musicbrainz_id: a.mb_id,
-      musicbrainz_score: a.mb_score,
+      musicbrainz_returned_name: a.mb_name,
+      musicbrainz_name_matches_spotify: a.mb_id ? normalizeName(a.name) === normalizeName(a.mb_name ?? '') : false,
       musicbrainz_tags: a.mb_tags?.map((t) => t.name) ?? [],
       musicbrainz_begin_year: a.mb_begin_year,
       musicbrainz_type: a.mb_type,

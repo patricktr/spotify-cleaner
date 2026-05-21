@@ -43,8 +43,14 @@ create table artists (
   popularity integer,
   genres text[] not null default '{}',
   fetched_at timestamptz,
-  -- MusicBrainz fields (nullable; populated when MB search succeeds)
+  -- MusicBrainz fields (nullable; populated when MB search succeeds).
+  -- mb_score is stored for diagnostics but NOT used by the classifier — MB's
+  -- Lucene relevance score is normalized so the top result always reports 100,
+  -- which makes it useless as a match-quality signal. The classifier instead
+  -- compares mb_name (what MB returned) to the artist's Spotify name; only a
+  -- normalized-name match counts as a real MusicBrainz hit.
   mb_id text,
+  mb_name text,
   mb_score integer,
   mb_tags jsonb,
   mb_country text,
