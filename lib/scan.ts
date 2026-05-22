@@ -307,7 +307,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
   // NULL` so a follow-up scan that finds nothing broken is a true no-op.
   // No Spotify calls in this loop — every field is from the /me/tracks
   // payload we already pulled.
-  let repairedTracks = 0;
+  const repairedTrackIds = new Set<string>();
   for (const { id } of tracksNeedingArtistRepair) {
     const lt = fullTrackById.get(id);
     if (!lt) continue;
@@ -322,15 +322,27 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       WHERE id = ${t.id}
         AND primary_artist_id IS NULL
     `;
-    repairedTracks++;
+    repairedTrackIds.add(t.id);
   }
+  const repairedTracks = repairedTrackIds.size;
   if (repairedTracks > 0) {
     console.log('[scan] repaired track artist links', { count: repairedTracks });
   }
 
-  // 5) Classify. tracksNeedingClassification was computed earlier (before
-  //    enrichment). Now load enriched artist data and run the classifier.
-  console.log('[scan] classifying', { count: tracksNeedingClassification.length });
+  // 5) Classify. Union of (a) tracks lacking a classification at the current
+  //    version (first-time work) and (b) tracks whose primary_artist_id we
+  //    just repaired — their existing classification was made with stale or
+  //    missing artist data, so re-run it now that the artist row is enriched.
+  //    The INSERT below uses ON CONFLICT DO UPDATE on (track_id,
+  //    classifier_version), so re-classification overwrites cleanly.
+  const tracksToClassifyIds = new Set<string>();
+  for (const { id } of tracksNeedingClassification) tracksToClassifyIds.add(id);
+  for (const id of repairedTrackIds) tracksToClassifyIds.add(id);
+  console.log('[scan] classifying', {
+    fresh: tracksNeedingClassification.length,
+    reclassified_from_repair: repairedTrackIds.size,
+    total: tracksToClassifyIds.size,
+  });
 
   const enrichedMap = new Map<string, EnrichedArtist>();
   if (referencedArtistIds.length > 0) {
@@ -342,7 +354,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
     for (const r of rows) enrichedMap.set(r.id, rowToEnriched(r));
   }
 
-  for (const { id } of tracksNeedingClassification) {
+  for (const id of tracksToClassifyIds) {
     const lt = fullTrackById.get(id);
     if (!lt) continue;
     try {
