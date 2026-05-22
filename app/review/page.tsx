@@ -11,6 +11,7 @@ export const dynamic = 'force-dynamic';
 type Verdict = 'authentic' | 'brain_rot' | 'borderline';
 type SortKey = 'conf_asc' | 'conf_desc' | 'recent' | 'alpha';
 type ReviewDecision = 'keep' | 'unlike' | 'protect' | 'always_unlike';
+type ReviewFilter = 'all' | 'marked' | 'unmarked';
 
 interface AccountOption {
   id: string;
@@ -113,11 +114,17 @@ function parseSort(raw: string | string[] | undefined): SortKey {
   return 'conf_asc';
 }
 
+function parseReview(raw: string | string[] | undefined): ReviewFilter {
+  if (raw === 'marked' || raw === 'unmarked') return raw;
+  return 'all';
+}
+
 // Build a URL string for filter links, mutating one param at a time.
 function buildUrl(params: {
   account: string | null;
   verdicts: Verdict[];
   sort: SortKey;
+  review: ReviewFilter;
 }): string {
   const search = new URLSearchParams();
   if (params.account) search.set('account', params.account);
@@ -127,6 +134,7 @@ function buildUrl(params: {
     search.set('verdict', ordered.join(','));
   }
   if (params.sort !== 'conf_asc') search.set('sort', params.sort);
+  if (params.review !== 'all') search.set('review', params.review);
   const qs = search.toString();
   return qs ? `/review?${qs}` : '/review';
 }
@@ -182,6 +190,7 @@ export default async function ReviewPage({ searchParams }: PageProps) {
   const account = parseAccount(params.account);
   const verdicts = parseVerdicts(params.verdict);
   const sort = parseSort(params.sort);
+  const review = parseReview(params.review);
 
   // -- Accounts for the filter dropdown -------------------------------------
   const accountRows = (await sql`
@@ -201,6 +210,7 @@ export default async function ReviewPage({ searchParams }: PageProps) {
   // optional and applied with a CASE-style guard.
   const accountFilter = account ?? null;
   const verdictArray = verdicts;
+  const reviewFilter = review;
 
   let orderClause: string;
   switch (sort) {
@@ -264,6 +274,13 @@ export default async function ReviewPage({ searchParams }: PageProps) {
       WHERE ll.removed_at IS NULL
         AND (${accountFilter}::uuid IS NULL OR ll.account_id = ${accountFilter}::uuid)
         AND lc.verdict = ANY(${verdictArray}::text[])
+        AND (
+          ${reviewFilter}::text = 'all'
+          OR (${reviewFilter}::text = 'marked'
+              AND (lr_specific.decision IS NOT NULL OR lr_global.decision IS NOT NULL))
+          OR (${reviewFilter}::text = 'unmarked'
+              AND lr_specific.decision IS NULL AND lr_global.decision IS NULL)
+        )
       ORDER BY lc.confidence DESC NULLS LAST, lc.classified_at DESC
     `;
   } else if (sort === 'recent') {
@@ -306,6 +323,13 @@ export default async function ReviewPage({ searchParams }: PageProps) {
       WHERE ll.removed_at IS NULL
         AND (${accountFilter}::uuid IS NULL OR ll.account_id = ${accountFilter}::uuid)
         AND lc.verdict = ANY(${verdictArray}::text[])
+        AND (
+          ${reviewFilter}::text = 'all'
+          OR (${reviewFilter}::text = 'marked'
+              AND (lr_specific.decision IS NOT NULL OR lr_global.decision IS NOT NULL))
+          OR (${reviewFilter}::text = 'unmarked'
+              AND lr_specific.decision IS NULL AND lr_global.decision IS NULL)
+        )
       ORDER BY lc.classified_at DESC
     `;
   } else if (sort === 'alpha') {
@@ -348,6 +372,13 @@ export default async function ReviewPage({ searchParams }: PageProps) {
       WHERE ll.removed_at IS NULL
         AND (${accountFilter}::uuid IS NULL OR ll.account_id = ${accountFilter}::uuid)
         AND lc.verdict = ANY(${verdictArray}::text[])
+        AND (
+          ${reviewFilter}::text = 'all'
+          OR (${reviewFilter}::text = 'marked'
+              AND (lr_specific.decision IS NOT NULL OR lr_global.decision IS NOT NULL))
+          OR (${reviewFilter}::text = 'unmarked'
+              AND lr_specific.decision IS NULL AND lr_global.decision IS NULL)
+        )
       ORDER BY lower(t.name) ASC, lower(sa.display_name) ASC
     `;
   } else {
@@ -391,6 +422,13 @@ export default async function ReviewPage({ searchParams }: PageProps) {
       WHERE ll.removed_at IS NULL
         AND (${accountFilter}::uuid IS NULL OR ll.account_id = ${accountFilter}::uuid)
         AND lc.verdict = ANY(${verdictArray}::text[])
+        AND (
+          ${reviewFilter}::text = 'all'
+          OR (${reviewFilter}::text = 'marked'
+              AND (lr_specific.decision IS NOT NULL OR lr_global.decision IS NOT NULL))
+          OR (${reviewFilter}::text = 'unmarked'
+              AND lr_specific.decision IS NULL AND lr_global.decision IS NULL)
+        )
       ORDER BY lc.confidence ASC NULLS FIRST, lc.classified_at DESC
     `;
   }
@@ -428,16 +466,18 @@ export default async function ReviewPage({ searchParams }: PageProps) {
 
   // -- Build URLs for filter chips/dropdowns --------------------------------
   const accountUrlFor = (id: string | null) =>
-    buildUrl({ account: id, verdicts, sort });
+    buildUrl({ account: id, verdicts, sort, review });
 
   const verdictUrlFor = (target: 'all' | Verdict) => {
     if (target === 'all') {
-      return buildUrl({ account, verdicts: ALL_VERDICTS, sort });
+      return buildUrl({ account, verdicts: ALL_VERDICTS, sort, review });
     }
-    return buildUrl({ account, verdicts: [target], sort });
+    return buildUrl({ account, verdicts: [target], sort, review });
   };
 
-  const sortUrlFor = (s: SortKey) => buildUrl({ account, verdicts, sort: s });
+  const sortUrlFor = (s: SortKey) => buildUrl({ account, verdicts, sort: s, review });
+
+  const reviewUrlFor = (r: ReviewFilter) => buildUrl({ account, verdicts, sort, review: r });
 
   const isAllVerdicts = verdicts.length === ALL_VERDICTS.length;
 
@@ -515,6 +555,33 @@ export default async function ReviewPage({ searchParams }: PageProps) {
                 prefetch={false}
               >
                 Brain rot
+              </Link>
+            </div>
+          </div>
+
+          <div className="filter-group">
+            <span className="filter-label">Review</span>
+            <div className="chip-row">
+              <Link
+                className={`chip ${review === 'all' ? 'chip-active' : ''}`}
+                href={reviewUrlFor('all')}
+                prefetch={false}
+              >
+                All
+              </Link>
+              <Link
+                className={`chip ${review === 'unmarked' ? 'chip-active' : ''}`}
+                href={reviewUrlFor('unmarked')}
+                prefetch={false}
+              >
+                Unmarked
+              </Link>
+              <Link
+                className={`chip ${review === 'marked' ? 'chip-active' : ''}`}
+                href={reviewUrlFor('marked')}
+                prefetch={false}
+              >
+                Marked
               </Link>
             </div>
           </div>
