@@ -126,10 +126,32 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
   `) as unknown as Array<{ id: string }>;
   console.log('[scan] tracks needing classification (pre-enrich)', { count: tracksNeedingClassification.length });
 
+  // Tracks already in our catalog whose primary_artist_id never got set —
+  // typically because Spotify stopped responding mid-/me/tracks during the
+  // initial fetch, so the track INSERT ran with t.artists empty. The current
+  // /me/tracks call has the artist data we need; re-upsert below to heal them.
+  // Scoped to this account's current liked songs since that's the data we have
+  // in memory, but the fix applies to the global `tracks` row so all accounts
+  // benefit.
+  const currentTrackIdList = [...currentIds];
+  const tracksNeedingArtistRepair = currentTrackIdList.length > 0
+    ? ((await sql`
+        SELECT id FROM tracks
+        WHERE id = ANY(${currentTrackIdList})
+          AND primary_artist_id IS NULL
+      `) as unknown as Array<{ id: string }>)
+    : [];
+  console.log('[scan] tracks needing artist repair', { count: tracksNeedingArtistRepair.length });
+
   // Union: artists from new likes + artists from tracks needing classification
+  //        + artists from tracks needing artist repair
   const artistIdSet = new Set<string>();
   for (const lt of newLikes) for (const a of lt.track.artists) artistIdSet.add(a.id);
   for (const { id } of tracksNeedingClassification) {
+    const lt = fullTrackById.get(id);
+    if (lt) for (const a of lt.track.artists) artistIdSet.add(a.id);
+  }
+  for (const { id } of tracksNeedingArtistRepair) {
     const lt = fullTrackById.get(id);
     if (lt) for (const a of lt.track.artists) artistIdSet.add(a.id);
   }
@@ -277,6 +299,33 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
       SET removed_at = now(), removed_by = 'user'
       WHERE account_id = ${accountId} AND track_id = ${trackId} AND removed_at IS NULL
     `;
+  }
+
+  // Repair existing track rows whose primary_artist_id was never set. The
+  // artist enrichment step above already inserted any missing artist rows
+  // (FK target), so the UPDATE is safe. Guarded by `AND primary_artist_id IS
+  // NULL` so a follow-up scan that finds nothing broken is a true no-op.
+  // No Spotify calls in this loop — every field is from the /me/tracks
+  // payload we already pulled.
+  let repairedTracks = 0;
+  for (const { id } of tracksNeedingArtistRepair) {
+    const lt = fullTrackById.get(id);
+    if (!lt) continue;
+    const t = lt.track;
+    const primaryArtistId = t.artists[0]?.id ?? null;
+    if (!primaryArtistId) continue; // Spotify still hasn't returned artists for this track
+    await sql`
+      UPDATE tracks
+      SET name = ${t.name},
+          artist_ids = ${t.artists.map((a) => a.id)},
+          primary_artist_id = ${primaryArtistId}
+      WHERE id = ${t.id}
+        AND primary_artist_id IS NULL
+    `;
+    repairedTracks++;
+  }
+  if (repairedTracks > 0) {
+    console.log('[scan] repaired track artist links', { count: repairedTracks });
   }
 
   // 5) Classify. tracksNeedingClassification was computed earlier (before
