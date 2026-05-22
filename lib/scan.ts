@@ -257,6 +257,9 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
         ${f ? new Date() : null}, now()
       )
       ON CONFLICT (id) DO UPDATE SET
+        name = EXCLUDED.name,
+        artist_ids = EXCLUDED.artist_ids,
+        primary_artist_id = COALESCE(tracks.primary_artist_id, EXCLUDED.primary_artist_id),
         popularity = EXCLUDED.popularity,
         fetched_at = now()
     `;

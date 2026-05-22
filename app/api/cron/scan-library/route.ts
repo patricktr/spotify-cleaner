@@ -19,6 +19,25 @@ export async function GET(req: NextRequest) {
   // Optional ?account_id=... query param scopes the scan to a single account
   // (useful for manual triggers — Vercel function timeout is 300s, so scanning
   // multiple large libraries in one request can exceed it).
+  // One-shot backfill (idempotent): repair tracks whose primary_artist_id
+  // landed null at first-insert time. The track INSERT used to never update
+  // primary_artist_id on conflict, so a one-time null stuck around forever,
+  // showing as "(unknown artist)" on the review page. This UPDATE only touches
+  // rows where (a) primary is null AND (b) artist_ids has an entry AND (c) that
+  // artist row exists, so it's FK-safe and a no-op after the first run. Cheap
+  // enough to leave in the cron path; no Spotify calls involved.
+  const backfilled = (await sql`
+    UPDATE tracks t
+    SET primary_artist_id = t.artist_ids[1]
+    WHERE t.primary_artist_id IS NULL
+      AND array_length(t.artist_ids, 1) >= 1
+      AND EXISTS (SELECT 1 FROM artists a WHERE a.id = t.artist_ids[1])
+    RETURNING id
+  `) as unknown as Array<{ id: string }>;
+  if (backfilled.length > 0) {
+    console.log('[scan-library] backfilled primary_artist_id', { count: backfilled.length });
+  }
+
   const accountIdFilter = req.nextUrl.searchParams.get('account_id');
   const accounts = accountIdFilter
     ? ((await sql`
