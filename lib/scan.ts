@@ -363,7 +363,7 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
         .filter((a): a is EnrichedArtist => a !== undefined);
 
       const c = await classifyTrack(lt.track, trackArtists);
-      const inserted = (await sql`
+      await sql`
         INSERT INTO classifications (track_id, verdict, confidence, classifier_version, signals)
         VALUES (${lt.track.id}, ${c.verdict}, ${c.confidence}, ${c.classifier_version}, ${JSON.stringify(c.signals)}::jsonb)
         ON CONFLICT (track_id, classifier_version) DO UPDATE SET
@@ -371,37 +371,112 @@ export async function scanAccount(accountId: string): Promise<ScanResult> {
           confidence = EXCLUDED.confidence,
           signals = EXCLUDED.signals,
           created_at = now()
-        RETURNING id
-      `) as unknown as Array<{ id: number }>;
+      `;
       result.classified++;
 
-      if (account.cleanup_enabled && c.verdict === 'brain_rot' && c.confidence >= AUTO_UNLIKE_THRESHOLD) {
-        const overrides = (await sql`
-          SELECT decision FROM reviews
-          WHERE track_id = ${lt.track.id}
-            AND (account_id = ${accountId} OR account_id IS NULL)
-            AND decision IN ('protect', 'keep')
-          ORDER BY reviewed_at DESC LIMIT 1
-        `) as unknown as Array<{ decision: string }>;
-        if (overrides.length > 0) continue;
-
-        await unlikeTracks(account.access_token, [lt.track.id]);
-        await sql`
-          INSERT INTO actions (account_id, track_id, action, classification_id, prior_liked_at)
-          VALUES (${accountId}, ${lt.track.id}, 'unlike', ${inserted[0].id}, ${new Date(lt.added_at)})
-        `;
-        await sql`
-          UPDATE library_likes
-          SET removed_at = now(), removed_by = 'cleaner'
-          WHERE account_id = ${accountId} AND track_id = ${lt.track.id} AND removed_at IS NULL
-        `;
-        result.autoUnliked++;
-      } else if (c.verdict === 'borderline' || (c.verdict === 'brain_rot' && c.confidence < AUTO_UNLIKE_THRESHOLD)) {
+      if (c.verdict === 'borderline' || (c.verdict === 'brain_rot' && c.confidence < AUTO_UNLIKE_THRESHOLD)) {
         result.queuedForReview++;
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       result.errors.push(`${lt.track.id} "${lt.track.name}": ${msg}`);
+    }
+  }
+
+  // 6) Cleanup pass — separate from classification. Acts on the account's
+  //    current library_likes regardless of whether this scan re-classified
+  //    them, so toggling cleanup_enabled on later (or marking a brain-rot
+  //    review on an already-classified track) takes effect on the next tick.
+  //
+  //    Scope: only this account. Manual unlike/always_unlike reviews trigger
+  //    Spotify removes ONLY on the account that wrote the review (a global
+  //    unlike review — account_id IS NULL — is data-only and does not act,
+  //    by policy: cross-account destruction must be explicit per account).
+  //    Suppression: keep/protect from either the account-specific OR global
+  //    review row blocks the unlike, with account-specific overriding global
+  //    when both exist (COALESCE picks the more specific).
+  if (account.cleanup_enabled) {
+    const toUnlike = (await sql`
+      WITH latest_class AS (
+        SELECT DISTINCT ON (track_id) track_id, verdict, confidence, id AS classification_id
+        FROM classifications
+        ORDER BY track_id, created_at DESC
+      ),
+      latest_review_specific AS (
+        SELECT DISTINCT ON (track_id) track_id, decision
+        FROM reviews
+        WHERE account_id = ${accountId}::uuid
+        ORDER BY track_id, reviewed_at DESC
+      ),
+      latest_review_global AS (
+        SELECT DISTINCT ON (track_id) track_id, decision
+        FROM reviews
+        WHERE account_id IS NULL
+        ORDER BY track_id, reviewed_at DESC
+      )
+      SELECT
+        ll.track_id,
+        ll.liked_at,
+        lc.classification_id,
+        CASE WHEN lrs.decision IN ('unlike', 'always_unlike')
+             THEN 'manual' ELSE 'classifier' END AS reason
+      FROM library_likes ll
+        LEFT JOIN latest_class lc ON lc.track_id = ll.track_id
+        LEFT JOIN latest_review_specific lrs ON lrs.track_id = ll.track_id
+        LEFT JOIN latest_review_global lrg ON lrg.track_id = ll.track_id
+      WHERE ll.account_id = ${accountId}::uuid
+        AND ll.removed_at IS NULL
+        AND COALESCE(lrs.decision, lrg.decision) IS DISTINCT FROM 'keep'
+        AND COALESCE(lrs.decision, lrg.decision) IS DISTINCT FROM 'protect'
+        AND (
+          lrs.decision IN ('unlike', 'always_unlike')
+          OR (lc.verdict = 'brain_rot' AND lc.confidence >= ${AUTO_UNLIKE_THRESHOLD})
+        )
+    `) as unknown as Array<{
+      track_id: string;
+      liked_at: Date;
+      classification_id: number | null;
+      reason: 'manual' | 'classifier';
+    }>;
+
+    console.log('[scan] cleanup candidates', {
+      account: account.display_name,
+      total: toUnlike.length,
+      manual: toUnlike.filter((r) => r.reason === 'manual').length,
+      classifier: toUnlike.filter((r) => r.reason === 'classifier').length,
+    });
+
+    // Batch the Spotify DELETE calls (50 IDs/request, matching unlikeTracks's
+    // internal chunk size) so logging stays atomic per batch: if Spotify
+    // rejects a batch, we don't write actions rows for it.
+    for (let i = 0; i < toUnlike.length; i += 50) {
+      const batch = toUnlike.slice(i, i + 50);
+      const batchIds = batch.map((r) => r.track_id);
+      try {
+        await unlikeTracks(account.access_token, batchIds);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn('[scan] cleanup batch failed', { size: batch.length, error: msg });
+        result.errors.push(`cleanup batch (${batch.length} tracks): ${msg}`);
+        continue;
+      }
+      for (const row of batch) {
+        await sql`
+          INSERT INTO actions (account_id, track_id, action, classification_id, prior_liked_at)
+          VALUES (${accountId}, ${row.track_id}, 'unlike', ${row.classification_id}, ${row.liked_at})
+        `;
+        await sql`
+          UPDATE library_likes
+          SET removed_at = now(), removed_by = 'cleaner'
+          WHERE account_id = ${accountId}::uuid
+            AND track_id = ${row.track_id}
+            AND removed_at IS NULL
+        `;
+        result.autoUnliked++;
+      }
+    }
+    if (result.autoUnliked > 0) {
+      console.log('[scan] cleanup unliked', { count: result.autoUnliked });
     }
   }
 
