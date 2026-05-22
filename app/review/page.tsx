@@ -653,7 +653,15 @@ export default async function ReviewPage({ searchParams }: PageProps) {
                 >
                   <div className="classification-meta">
                     <div className="classification-headline">
-                      <strong>{r.track_name}</strong>
+                      <a
+                        href={`https://open.spotify.com/track/${r.track_id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="track-link"
+                        title="Open in Spotify"
+                      >
+                        <strong>{r.track_name}</strong>
+                      </a>
                       <span className="muted">
                         {r.artist_name ?? (
                           <em className="muted">(unknown artist)</em>
