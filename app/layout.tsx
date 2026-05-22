@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import './globals.css';
 
 export const metadata = {
@@ -11,8 +12,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <header className="site-header">
           <div className="site-header-inner">
-            <span className="site-title">Spotify Cleaner</span>
-            <span className="site-tag">Family library audit</span>
+            <Link href="/" prefetch={false} className="site-title">
+              Spotify Cleaner
+            </Link>
+            <nav className="site-nav">
+              <Link href="/" prefetch={false} className="site-nav-link">
+                Accounts
+              </Link>
+              <Link href="/review" prefetch={false} className="site-nav-link">
+                Review
+              </Link>
+            </nav>
           </div>
         </header>
         <main className="site-main">{children}</main>

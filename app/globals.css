@@ -130,11 +130,28 @@ a:hover {
   font-weight: 600;
   letter-spacing: -0.005em;
   color: var(--text);
+  text-decoration: none;
 }
 
-.site-tag {
-  font-size: 0.8rem;
-  color: var(--text-dim);
+.site-title:hover {
+  color: var(--accent-hover);
+  text-decoration: none;
+}
+
+.site-nav {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.site-nav-link {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.site-nav-link:hover {
+  color: var(--accent-hover);
+  text-decoration: none;
 }
 
 .site-main {
@@ -768,21 +785,37 @@ button[type="submit"] {
 }
 
 @media (max-width: 540px) {
+  .classification-list {
+    gap: var(--space-2);
+  }
+
   .classification-row {
     flex-direction: column;
     align-items: stretch;
+    gap: var(--space-2);
+    padding: var(--space-3) 0;
+  }
+
+  /* On desktop the meta carries a flex-basis to size its column. In a column
+     flex container that basis becomes a *height*, which was forcing each row
+     to be ~320px tall (the big mobile gap). Reset it. */
+  .classification-meta {
+    flex: 1 1 auto;
   }
 
   .classification-actions {
     width: 100%;
+    gap: var(--space-2);
   }
 
   .classification-actions form {
-    flex: 1 1 auto;
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .classification-actions .btn {
     width: 100%;
+    padding: 0.45rem 0.5rem;
   }
 
   .filter-group {
