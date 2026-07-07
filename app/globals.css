@@ -306,6 +306,7 @@ a:hover {
 }
 
 input[type="text"],
+input[type="password"],
 input:not([type]),
 select {
   width: 100%;
@@ -318,6 +319,36 @@ select {
   font-size: 0.95rem;
   line-height: 1.4;
   appearance: none;
+}
+
+.password-wrap {
+  position: relative;
+  display: block;
+}
+.password-wrap input {
+  padding-right: 2.6rem;
+}
+.password-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 2.6rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.password-toggle:hover {
+  color: var(--accent);
+}
+.password-toggle svg {
+  width: 20px;
+  height: 20px;
+  display: block;
 }
 
 select {

@@ -1,3 +1,5 @@
+import { PasswordField } from './password-field';
+
 export const dynamic = 'force-dynamic';
 
 interface LoginPageProps {
@@ -27,19 +29,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         )}
         <form action="/api/auth/login" method="post" className="form">
           <input type="hidden" name="next" value={next} />
-          <div className="field">
-            <label className="field-label" htmlFor="password">
-              Password
-            </label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              required
-              autoFocus
-              autoComplete="current-password"
-            />
-          </div>
+          <PasswordField />
           <button type="submit" className="btn btn-primary">
             Sign in
           </button>
