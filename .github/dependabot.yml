@@ -7,6 +7,14 @@ updates:
       day: "monday"
       time: "06:00"
     open-pull-requests-limit: 10
+    ignore:
+      # TypeScript 7 is the native (Go) rewrite: it drops the `main` entry
+      # point (lib/typescript.js) and `tsserver`, so Next.js's
+      # `require.resolve("typescript")` detection fails and the build dies with
+      # "Please install typescript". Hold at v6 until Next.js supports the v7
+      # package layout.
+      - dependency-name: "typescript"
+        versions: [">=7"]
     groups:
       minor-and-patch:
         applies-to: version-updates
