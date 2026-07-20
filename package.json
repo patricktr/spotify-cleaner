@@ -16,7 +16,7 @@
     "db:push": "psql \"$POSTGRES_URL_NON_POOLING\" -f db/schema.sql"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0",
+    "@anthropic-ai/sdk": "^0.112.3",
     "@neondatabase/serverless": "^1.1.0",
     "next": "^16.2.10",
     "postgres": "^3.4.5",
