@@ -3,8 +3,15 @@ name: Dependabot auto-merge
 # Auto-merges Dependabot minor/patch version bumps once all other checks pass.
 # Major bumps are left for manual review. No branch protection required: the
 # job waits for the PR's checks itself (excluding this workflow) and only
-# merges if none failed. On each Dependabot rebase the PR re-syncs and this
-# re-runs, so a lockfile-conflict cascade across grouped PRs self-resolves.
+# merges if none failed.
+#
+# A PR is merged ONLY when its branch already contains the current base tip.
+# Without that rule, two Dependabot PRs branched from the same commit each pass
+# CI against their own lockfile, and merging both makes git text-merge the
+# second one's lockfile diff onto an already-moved base -- silently producing
+# duplicate YAML keys and an ERR_PNPM_BROKEN_LOCKFILE that breaks installs on
+# the base branch and on every open PR. Requiring up-to-date means the tree CI
+# validated is exactly the tree being merged.
 
 on:
   pull_request_target:
@@ -13,6 +20,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
+
+# Serialize per repo. Two of these racing is how a stale PR slips through
+# between another PR's merge and this one's up-to-date check.
+concurrency:
+  group: dependabot-auto-merge-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   auto-merge:
@@ -26,13 +39,33 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Wait for checks, then squash-merge (minor/patch only)
+      - name: Merge when up to date and green (minor/patch only)
         if: ${{ contains(fromJSON('["version-update:semver-minor","version-update:semver-patch"]'), steps.meta.outputs.update-type) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
         run: |
+          set -uo pipefail
+
+          HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+
+          # --- Gate 1: refuse to merge a branch that is behind the base ---
+          BEHIND=$(gh api "repos/$REPO/compare/$BASE...$HEAD_SHA" --jq '.behind_by' 2>/dev/null || echo "")
+          if [ -z "$BEHIND" ]; then
+            echo "::warning::Could not determine how far behind $BASE this PR is - not merging."
+            exit 0
+          fi
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "::notice::PR is $BEHIND commit(s) behind $BASE. Updating the branch instead of merging;"
+            echo "::notice::the resulting push re-runs CI on the real merged tree and re-triggers this workflow."
+            gh pr update-branch "$PR" --repo "$REPO" \
+              || echo "::warning::update-branch failed (likely a conflict). Leaving for Dependabot to rebase."
+            exit 0
+          fi
+
+          # --- Gate 2: wait for the PR's other checks to settle ---
           settled=0
           for i in $(seq 1 30); do
             sleep 30
@@ -42,13 +75,59 @@ jobs:
             failed=$(echo "$ext" | jq '[.[] | select(.bucket == "fail")] | length')
             pending=$(echo "$ext" | jq '[.[] | select(.bucket == "pending")] | length')
             if [ "$failed" -gt 0 ]; then
-              echo "A required check failed — not merging."
+              echo "A required check failed - not merging."
               exit 0
             fi
             if [ "$pending" -eq 0 ]; then settled=1; break; fi
           done
-          if [ "$settled" = "1" ]; then
-            gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
-          else
-            echo "Checks did not settle in time — leaving for manual review."
+          if [ "$settled" != "1" ]; then
+            echo "Checks did not settle in time - leaving for manual review."
+            exit 0
           fi
+
+          # --- Gate 3: the base may have moved while we waited ---
+          BEHIND=$(gh api "repos/$REPO/compare/$BASE...$HEAD_SHA" --jq '.behind_by' 2>/dev/null || echo "")
+          if [ -n "$BEHIND" ] && [ "$BEHIND" -gt 0 ]; then
+            echo "::notice::$BASE advanced while waiting for checks - updating branch instead of merging."
+            gh pr update-branch "$PR" --repo "$REPO" || true
+            exit 0
+          fi
+
+          # --- Gate 4: never let a corrupt pnpm lockfile reach the base ---
+          # Read-only content fetch; no PR code is executed. Duplicate keys
+          # *within* `packages:` or `snapshots:` are the corruption signature
+          # (a package appearing once in each section is normal).
+          LOCK_OK=1
+          if gh api "repos/$REPO/contents/pnpm-lock.yaml?ref=$HEAD_SHA" \
+               -H "Accept: application/vnd.github.raw" > /tmp/lock.yaml 2>/dev/null; then
+            python3 - /tmp/lock.yaml <<'PY' || LOCK_OK=0
+          import re, sys
+          section, seen, dupes = None, {}, []
+          for i, line in enumerate(open(sys.argv[1]), 1):
+              line = line.rstrip("\n")
+              if re.match(r'^(packages|snapshots|importers):\s*$', line):
+                  section = line.split(':')[0]
+                  seen[section] = {}
+                  continue
+              m = re.match(r"^  ('[^']+'|[^ :][^:]*):", line)
+              if m and section in ('packages', 'snapshots'):
+                  k = m.group(1).strip("'")
+                  if k in seen[section]:
+                      dupes.append("%s: %s (line %d, first at %d)" % (section, k, i, seen[section][k]))
+                  else:
+                      seen[section][k] = i
+          if dupes:
+              print("Duplicate keys in pnpm-lock.yaml:")
+              for d in dupes[:10]:
+                  print("  " + d)
+              sys.exit(1)
+          PY
+          fi
+          if [ "$LOCK_OK" != "1" ]; then
+            echo "::error::pnpm-lock.yaml on this branch has duplicate keys - refusing to merge."
+            gh pr comment "$PR" --repo "$REPO" --body \
+              "⚠️ Auto-merge refused: \`pnpm-lock.yaml\` on this branch has duplicate mapping keys, which makes \`pnpm install\` fail with \`ERR_PNPM_BROKEN_LOCKFILE\`. This usually means a base-branch update text-merged two lockfile changes. Ask Dependabot to regenerate it with \`@dependabot recreate\`."
+            exit 0
+          fi
+
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
