@@ -21,10 +21,13 @@ permissions:
   contents: write
   pull-requests: write
 
-# Serialize per repo. Two of these racing is how a stale PR slips through
-# between another PR's merge and this one's up-to-date check.
+# Scoped to a single PR, NOT the whole repo. A repo-wide group looks like it
+# serializes safely, but GitHub cancels an already-pending run when a newer one
+# queues in the same group -- so when Dependabot opens several PRs at once, the
+# middle ones are silently dropped and never merge. Cross-PR safety comes from
+# the up-to-date gates below, which re-check the base right before merging.
 concurrency:
-  group: dependabot-auto-merge-${{ github.repository }}
+  group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
