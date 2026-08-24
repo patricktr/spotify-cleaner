@@ -87,13 +87,23 @@ jobs:
             settled=0
             for i in $(seq 1 20); do
               sleep 30
-              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket 2>/dev/null || echo '[]')
+              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,description 2>/dev/null || echo '[]')
               # Ignore this workflow's own check so we don't wait on ourselves.
               ext=$(echo "$json" | jq '[.[] | select((.name | ascii_downcase) | test("auto-merge") | not)]')
-              failed=$(echo "$ext" | jq '[.[] | select(.bucket == "fail")] | length')
+              # Snyk reports an exhausted test allowance as a failed check. That is a
+              # billing state, not a finding about this change, so it must not hold a
+              # merge. A Snyk failure with any other message still blocks.
+              blocking=$(echo "$ext" | jq '[.[]
+                | select(.bucket == "fail")
+                | select((((.name // "") | ascii_downcase | test("snyk"))
+                          and (((.description // "") | ascii_downcase)
+                               | test("limit of private tests|used your limit"))) | not)]')
+              failed=$(echo "$blocking" | jq 'length')
               pending=$(echo "$ext" | jq '[.[] | select(.bucket == "pending")] | length')
+              waived=$(echo "$ext" | jq -r '[.[] | select(.bucket == "fail") | .name] - [.[] | select(.bucket == "fail") | .name] | length' 2>/dev/null || echo 0)
               if [ "$failed" -gt 0 ]; then
-                echo "A required check failed - not merging."
+                echo "A required check failed - not merging:"
+                echo "$blocking" | jq -r '.[] | "  \(.name): \(.description // "no detail")"'
                 exit 0
               fi
               if [ "$pending" -eq 0 ]; then settled=1; break; fi
