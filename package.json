@@ -18,18 +18,18 @@
     "db:push": "psql \"$POSTGRES_URL_NON_POOLING\" -f db/schema.sql"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.120.0",
+    "@anthropic-ai/sdk": "^0.122.0",
     "@neondatabase/serverless": "^1.1.0",
-    "next": "^16.3.1",
+    "next": "^16.3.3",
     "postgres": "^3.4.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@types/react-dom": "^19.2.5",
     "typescript": "^6"
   }
 }
