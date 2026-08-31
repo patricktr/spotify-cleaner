@@ -233,11 +233,12 @@ jobs:
 
             # --- The lockfile must still honour the manifest's overrides ---
             # Dependabot regenerates lockfiles without applying pnpm.overrides,
-            # which drops the lockfile's own overrides: block. Nothing goes red
-            # when that happens: the manifest still says the package is pinned,
-            # so the pin looks intact while the tree resolves back to whatever
-            # the graph wants, and pnpm install --frozen-lockfile does not
-            # object. Security pins can be reverted with every check green.
+            # which drops the lockfile's own overrides: block and reverts the
+            # pinned versions. pnpm install --frozen-lockfile then refuses the
+            # result with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH, so wherever CI runs
+            # a frozen install this is a broken build, not a silent regression.
+            # This gate is the backstop for the repos that have no CI, and for
+            # Vercel, whose own install is not frozen.
             OV=1
             if gh api "repos/$REPO/contents/package.json?ref=$NOW_SHA" \
                  -H "Accept: application/vnd.github.raw" > /tmp/ovman.json 2>/dev/null \
@@ -275,7 +276,7 @@ jobs:
               echo "::error::The lockfile no longer honours package.json overrides - refusing to merge."
               cat /tmp/ovout.txt 2>/dev/null || true
               gh pr comment "$PR" --repo "$REPO" --body \
-                "⚠️ Auto-merge refused: this branch's \`pnpm-lock.yaml\` no longer honours the \`pnpm.overrides\` declared in \`package.json\`. Dependabot regenerates lockfiles without applying them, which silently reverts security pins while every check stays green. Fix by running \`pnpm install --lockfile-only\` on the branch and pushing the result." >/dev/null 2>&1 || true
+                "⚠️ Auto-merge refused: this branch's \`pnpm-lock.yaml\` no longer honours the \`pnpm.overrides\` declared in \`package.json\`. Dependabot regenerates lockfiles without applying them, so the pinned versions revert and \`pnpm install --frozen-lockfile\` fails with \`ERR_PNPM_LOCKFILE_CONFIG_MISMATCH\`. Fix by running \`pnpm install --lockfile-only\` on the branch and pushing the result." >/dev/null 2>&1 || true
               exit 0
             fi
 
