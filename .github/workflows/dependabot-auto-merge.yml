@@ -126,8 +126,12 @@ jobs:
             settled=0
             for i in $(seq 1 20); do
               sleep 30
-              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,description 2>/dev/null)
-              rc=$?
+              # `gh pr checks` exits 8 while checks are still pending, and this step
+              # runs under `bash -e`, where the assignment IS the command -- so an
+              # unguarded assignment kills the job before rc is ever read, precisely
+              # when checks are still running. Capture the status through `||`.
+              rc=0
+              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,description 2>/dev/null) || rc=$?
               # gh exits non-zero both when a check FAILED (output still valid)
               # and when it could not read anything at all. Distinguish on the
               # payload, not the code: unparseable means unknown, not green.
