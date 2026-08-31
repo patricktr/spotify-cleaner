@@ -55,6 +55,33 @@ jobs:
         run: |
           set -uo pipefail
 
+          # Reports this repo's own CI workflow for a sha as one of:
+          #   success | pending | none | action_required | <other conclusion>
+          # Only "success" may merge. An empty workflow_runs array yields the
+          # literal "null|null", which is reported as "none", never as a pass.
+          ci_state() {
+            local sha="$1" wf run st cc
+            # Resolve by workflow NAME, not filename: this repo's CI job may live in
+            # ci.yml or verify.yml. If there is no CI workflow at all, this gate has
+            # nothing to prove and must stay silent -- returning "none" here would
+            # block every merge in a repo that simply has no CI.
+            wf=$(gh api "repos/$REPO/actions/workflows" \
+                   --jq '[.workflows[] | select(.name=="CI" and .state=="active")][0].id' 2>/dev/null) || wf=""
+            case "$wf" in ""|null) echo "absent-workflow"; return ;; esac
+            run=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$sha&per_page=1" \
+                    --jq '.workflow_runs[0] | "\(.status)|\(.conclusion)"' 2>/dev/null) || run=""
+            case "$run" in
+              ""|"null|null") echo "none"; return ;;
+            esac
+            st="${run%%|*}"; cc="${run##*|}"
+            if [ "$st" != "completed" ]; then echo "pending"; return; fi
+            case "$cc" in
+              success)  echo "success" ;;
+              null|"")  echo "pending" ;;
+              *)        echo "$cc" ;;
+            esac
+          }
+
           # Up to three passes. Each pass re-reads the head, because updating the
           # branch rewrites it and nothing else will tell us it moved.
           for attempt in 1 2 3; do
@@ -84,10 +111,30 @@ jobs:
             fi
 
             # --- Wait for this head's other checks to settle ---
+            #
+            # `gh pr checks` only reports checks that actually EXIST. A CI run
+            # that produced no check runs -- one parked at `action_required`
+            # awaiting workflow approval, or one never started -- is simply
+            # ABSENT from that list, and an absent check counts here as neither
+            # failed nor pending, i.e. it reads as green.
+            #
+            # That is exactly how a red CI reached main: the two Vercel checks
+            # passed, the CI job was missing rather than failing, the loop
+            # called it settled, and a lockfile that cannot install was merged.
+            # So ci.yml is verified separately against the Actions API, for the
+            # exact head sha, and absence is never treated as success.
             settled=0
             for i in $(seq 1 20); do
               sleep 30
-              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,description 2>/dev/null || echo '[]')
+              json=$(gh pr checks "$PR" --repo "$REPO" --json name,bucket,description 2>/dev/null)
+              rc=$?
+              # gh exits non-zero both when a check FAILED (output still valid)
+              # and when it could not read anything at all. Distinguish on the
+              # payload, not the code: unparseable means unknown, not green.
+              if ! echo "$json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                echo "::notice::Attempt $i: PR checks unreadable (gh exit $rc) - not assuming green."
+                continue
+              fi
               # Ignore this workflow's own check so we don't wait on ourselves.
               ext=$(echo "$json" | jq '[.[] | select((.name | ascii_downcase) | test("auto-merge") | not)]')
               # Snyk reports an exhausted test allowance as a failed check. That is a
@@ -106,6 +153,24 @@ jobs:
                 echo "$blocking" | jq -r '.[] | "  \(.name): \(.description // "no detail")"'
                 exit 0
               fi
+              # An absent or unfinished CI run is not a pass. See the note above.
+              SHA_NOW=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null || echo "$HEAD_SHA")
+              ci=$(ci_state "$SHA_NOW")
+              case "$ci" in
+                success|absent-workflow) ;;
+                none|pending)
+                  echo "::notice::Attempt $i: ci.yml on $SHA_NOW is '$ci' - waiting."
+                  continue ;;
+                action_required)
+                  echo "::error::ci.yml on $SHA_NOW needs workflow approval and never ran - not merging."
+                  gh pr comment "$PR" --repo "$REPO" --body \
+                    "⚠️ Auto-merge refused: the CI run for \`$SHA_NOW\` is parked at \`action_required\`, so it produced no check runs and nothing here proves this branch is green. Approve the workflow run (Actions tab) or push a commit, and CI will run." >/dev/null 2>&1 || true
+                  exit 0 ;;
+                *)
+                  echo "::error::ci.yml on $SHA_NOW concluded '$ci' - not merging."
+                  exit 0 ;;
+              esac
+
               if [ "$pending" -eq 0 ]; then settled=1; break; fi
             done
             if [ "$settled" != "1" ]; then
@@ -155,6 +220,62 @@ jobs:
               echo "::error::pnpm-lock.yaml on this branch has duplicate keys - refusing to merge."
               gh pr comment "$PR" --repo "$REPO" --body \
                 "⚠️ Auto-merge refused: \`pnpm-lock.yaml\` on this branch has duplicate mapping keys, which makes \`pnpm install\` fail with \`ERR_PNPM_BROKEN_LOCKFILE\`. This usually means a base-branch update text-merged two lockfile changes. Ask Dependabot to regenerate it with \`@dependabot recreate\`."
+              exit 0
+            fi
+
+            # The head can move while the guards above run. Re-verify CI
+            # against the exact sha that is about to be squashed onto the base.
+            ci=$(ci_state "$NOW_SHA")
+            if [ "$ci" != "success" ] && [ "$ci" != "absent-workflow" ]; then
+              echo "::error::CI on $NOW_SHA is '$ci', not success - not merging."
+              exit 0
+            fi
+
+            # --- The lockfile must still honour the manifest's overrides ---
+            # Dependabot regenerates lockfiles without applying pnpm.overrides,
+            # which drops the lockfile's own overrides: block. Nothing goes red
+            # when that happens: the manifest still says the package is pinned,
+            # so the pin looks intact while the tree resolves back to whatever
+            # the graph wants, and pnpm install --frozen-lockfile does not
+            # object. Security pins can be reverted with every check green.
+            OV=1
+            if gh api "repos/$REPO/contents/package.json?ref=$NOW_SHA" \
+                 -H "Accept: application/vnd.github.raw" > /tmp/ovman.json 2>/dev/null \
+               && gh api "repos/$REPO/contents/pnpm-lock.yaml?ref=$NOW_SHA" \
+                 -H "Accept: application/vnd.github.raw" > /tmp/ovlock.yaml 2>/dev/null; then
+              python3 - /tmp/ovman.json /tmp/ovlock.yaml <<'PY' > /tmp/ovout.txt 2>&1 || OV=0
+          import json, re, sys
+          declared = json.load(open(sys.argv[1])).get("pnpm", {}).get("overrides") or {}
+          if not declared:
+              print("no pnpm overrides declared")
+              sys.exit(0)
+          text = open(sys.argv[2]).read()
+          m = re.search(r'^overrides:\n((?:[ \t]+\S.*\n|\n)*)', text, re.M)
+          recorded = {}
+          if m:
+              for line in m.group(1).split("\n"):
+                  km = re.match(r"^\s+('[^']+'|[^:]+):\s*(.*)$", line)
+                  if km:
+                      recorded[km.group(1).strip().strip("'")] = km.group(2).strip().strip("'")
+          bad = []
+          for k, v in declared.items():
+              if k not in recorded:
+                  bad.append("missing from lockfile: %s = %s" % (k, v))
+              elif recorded[k] != v:
+                  bad.append("value differs: %s = %s in package.json, %s in lockfile" % (k, v, recorded[k]))
+          if bad:
+              print("the lockfile no longer honours the declared overrides:")
+              for b in bad[:10]:
+                  print("  " + b)
+              sys.exit(1)
+          print("%d override(s) honoured by the lockfile" % len(declared))
+          PY
+            fi
+            if [ "$OV" != "1" ]; then
+              echo "::error::The lockfile no longer honours package.json overrides - refusing to merge."
+              cat /tmp/ovout.txt 2>/dev/null || true
+              gh pr comment "$PR" --repo "$REPO" --body \
+                "⚠️ Auto-merge refused: this branch's \`pnpm-lock.yaml\` no longer honours the \`pnpm.overrides\` declared in \`package.json\`. Dependabot regenerates lockfiles without applying them, which silently reverts security pins while every check stays green. Fix by running \`pnpm install --lockfile-only\` on the branch and pushing the result." >/dev/null 2>&1 || true
               exit 0
             fi
 
