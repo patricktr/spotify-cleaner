@@ -124,8 +124,15 @@ jobs:
             # So ci.yml is verified separately against the Actions API, for the
             # exact head sha, and absence is never treated as success.
             settled=0
-            for i in $(seq 1 20); do
-              sleep 30
+            # Poll briefly, then let go. The runner is billed for wall-clock
+            # time, so every second spent asleep here costs the same as a
+            # second spent working: a 20x30s loop billed ~11 minutes per run
+            # and consumed ~1,900 Actions minutes in a single cycle. A PR
+            # whose checks are still running is picked up by the next event
+            # instead. Do NOT raise these numbers to 'make merging more
+            # reliable' -- that trade is what caused the overrun.
+            for i in $(seq 1 3); do
+              sleep 20
               # `gh pr checks` exits 8 while checks are still pending, and this step
               # runs under `bash -e`, where the assignment IS the command -- so an
               # unguarded assignment kills the job before rc is ever read, precisely
