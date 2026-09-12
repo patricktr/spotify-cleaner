@@ -19,41 +19,104 @@ name: Dependabot auto-merge
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
+  # Re-evaluate when CI finishes instead of holding a paid runner
+  # asleep waiting for it. Scoped to the workflow NAME so this file
+  # can never trigger itself.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  # Vercel is usually the slowest check and is not a workflow, so
+  # workflow_run cannot see it finish. Its check suite can. The job gate
+  # below restricts this to the vercel app: suites from other apps are
+  # skipped before a runner is allocated, which costs nothing, and a
+  # vercel suite can never be produced by this workflow itself.
+  check_suite:
+    types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
+  # Without these the job cannot read its own PR's checks: `gh pr checks`
+  # exits 1 with unparseable output, every attempt reports "checks
+  # unreadable", and the run sleeps out its whole window and merges
+  # nothing. That failure is silent -- the job still reports success.
+  checks: read
+  statuses: read
 
 # Scoped to a single PR, not the whole repo. A repo-wide group looks like safe
 # serialization, but GitHub cancels an already-pending run when a newer one
 # queues into the same group, so a batch of Dependabot PRs loses the middle
 # ones. Cross-PR safety comes from the base-tip checks below.
 concurrency:
-  group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number }}
+  group: dependabot-auto-merge-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
   cancel-in-progress: false
 
 jobs:
   auto-merge:
     name: auto-merge
-    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    if: >-
+      ${{ (github.event_name == 'pull_request_target'
+            && github.event.pull_request.user.login == 'dependabot[bot]')
+          || (github.event_name == 'workflow_run'
+            && github.event.workflow_run.event == 'pull_request'
+            && github.event.workflow_run.pull_requests[0] != null)
+          || (github.event_name == 'check_suite'
+            && github.event.check_suite.app.slug == 'vercel'
+            && github.event.check_suite.pull_requests[0] != null) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Only runs on the PR event: this action reads github.event.pull_request
+      # and fails outright on workflow_run. The minor/patch verdict it
+      # produces is carried to the workflow_run path by the label below.
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v3
+        if: ${{ github.event_name == 'pull_request_target' }}
+        uses: dependabot/fetch-metadata@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge when up to date and green (minor/patch only)
-        if: ${{ contains(fromJSON('["version-update:semver-minor","version-update:semver-patch"]'), steps.meta.outputs.update-type) }}
+        # On the PR event the verdict comes from fetch-metadata. On every
+        # other event that action has not run, so eligibility is enforced
+        # inside the script by the label gate instead.
+        if: >-
+          ${{ github.event_name != 'pull_request_target'
+              || contains(fromJSON('["version-update:semver-minor","version-update:semver-patch"]'),
+                          steps.meta.outputs.update-type) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number
+                  || github.event.workflow_run.pull_requests[0].number
+                  || github.event.check_suite.pull_requests[0].number }}
           REPO: ${{ github.repository }}
-          BASE: ${{ github.event.pull_request.base.ref }}
+          BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          EVENT: ${{ github.event_name }}
+          ELIGIBLE_LABEL: automerge:minor-patch
         run: |
           set -uo pipefail
+
+          # The minor/patch decision comes from fetch-metadata, which only
+          # runs on the PR event. Persist it as a label so the workflow_run
+          # path can trust it without re-deriving it -- group PRs have no
+          # parseable from/to versions in their title, so re-deriving is not
+          # reliable.
+          if [ "$EVENT" = "pull_request_target" ]; then
+            gh label create "$ELIGIBLE_LABEL" --repo "$REPO" --color ededed \
+              --description "Dependabot minor/patch bump cleared for auto-merge" >/dev/null 2>&1 || true
+            gh pr edit "$PR" --repo "$REPO" --add-label "$ELIGIBLE_LABEL" >/dev/null 2>&1 || true
+          else
+            AUTHOR=$(gh pr view "$PR" --repo "$REPO" --json author --jq .author.login 2>/dev/null || echo "")
+            if [ "$AUTHOR" != "app/dependabot" ] && [ "$AUTHOR" != "dependabot[bot]" ]; then
+              echo "PR #$PR is not a Dependabot PR (author=$AUTHOR) - nothing to do."
+              exit 0
+            fi
+            if ! gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null \
+                 | grep -qx "$ELIGIBLE_LABEL"; then
+              echo "PR #$PR has no $ELIGIBLE_LABEL label - not cleared for auto-merge."
+              exit 0
+            fi
+          fi
 
           # Reports this repo's own CI workflow for a sha as one of:
           #   success | pending | none | action_required | <other conclusion>
