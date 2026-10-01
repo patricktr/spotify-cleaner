@@ -25,13 +25,18 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-  # Vercel is usually the slowest check and is not a workflow, so
-  # workflow_run cannot see it finish. Its check suite can. The job gate
-  # below restricts this to the vercel app: suites from other apps are
-  # skipped before a runner is allocated, which costs nothing, and a
-  # vercel suite can never be produced by this workflow itself.
-  check_suite:
-    types: [completed]
+  # NOTE: a check_suite trigger scoped to the vercel app used to live here.
+  # It was removed deliberately to cut Actions usage -- it accounted for
+  # ~52 runs / ~60 wall-minutes in a single cycle. The cost of removing it
+  # is merge latency: in a sample of 18 merged PRs, a Vercel check was the
+  # LAST one to finish in 15 of them, and nothing now re-evaluates a PR
+  # when Vercel finishes after CI. Such a PR waits for its next Dependabot
+  # event instead of merging promptly.
+  #
+  # To restore it, add back:
+  #   check_suite:
+  #     types: [completed]
+  # together with the check_suite clauses in the job `if:` and in PR below.
 
 permissions:
   contents: write
@@ -59,10 +64,7 @@ jobs:
             && github.event.pull_request.user.login == 'dependabot[bot]')
           || (github.event_name == 'workflow_run'
             && github.event.workflow_run.event == 'pull_request'
-            && github.event.workflow_run.pull_requests[0] != null)
-          || (github.event_name == 'check_suite'
-            && github.event.check_suite.app.slug == 'vercel'
-            && github.event.check_suite.pull_requests[0] != null) }}
+            && github.event.workflow_run.pull_requests[0] != null) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -87,8 +89,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number
-                  || github.event.workflow_run.pull_requests[0].number
-                  || github.event.check_suite.pull_requests[0].number }}
+                  || github.event.workflow_run.pull_requests[0].number }}
           REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
           EVENT: ${{ github.event_name }}
