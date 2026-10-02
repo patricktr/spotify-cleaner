@@ -1,0 +1,114 @@
+name: Dependabot merge
+
+# Merges a Dependabot PR as soon as its head commit has been built green.
+#
+# Vercel is the build gate: every push gets a frozen install, a type-check and a
+# build, so nothing here re-runs them. The job is triggered by Vercel's own
+# commit status rather than by the PR, so it never sits waiting for checks: a
+# run takes seconds and bills one minute. Status events for anything else (your
+# own pushes, pending or failed builds, non-Dependabot branches) skip the job
+# before a runner starts, and a skipped job bills nothing.
+#
+# A repo with no Vercel build gates Dependabot PRs with a PR-only workflow named
+# CI instead, and this job runs when that CI passes on a Dependabot branch.
+#
+# Majors are left for a human. Version updates mark them in their metadata;
+# security updates carry no update-type, so every "from X to Y" in the commit
+# messages is compared as well.
+
+on:
+  status:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: read
+
+jobs:
+  merge:
+    if: >-
+      (github.event_name == 'status'
+        && github.event.state == 'success'
+        && startsWith(github.event.context, 'Vercel')
+        && contains(join(github.event.branches.*.name, ' '), 'dependabot/'))
+      || (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && startsWith(github.event.workflow_run.head_branch, 'dependabot/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    # A monorepo posts one Vercel status per project; take them one at a time.
+    concurrency:
+      group: dependabot-merge-${{ github.event.sha || github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Merge when the build is green and nothing is a major bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.sha || github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+
+          pr=$(gh pr list -R "$REPO" --state open --json number,headRefOid,author \
+            --jq ".[] | select(.headRefOid == \"$SHA\" and .author.login == \"app/dependabot\") | .number")
+          if [ -z "$pr" ]; then echo "No open Dependabot PR has $SHA as its head."; exit 0; fi
+
+          notgreen=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq '[.statuses[] | select(.context | startswith("Vercel")) | select(.state != "success")] | length')
+          if [ "$notgreen" != 0 ]; then echo "PR #$pr: ${notgreen:-?} Vercel build(s) not green yet."; exit 0; fi
+
+          # Versions appear as "from X to Y" in commit messages and, for large
+          # groups, only as a table row in the PR body (\x60 is a backtick).
+          rc=0
+          gh pr view "$pr" -R "$REPO" --json commits,body \
+            --jq '(.commits[] | .messageHeadline + "\n" + .messageBody), .body' | python3 -c '
+          import re, sys
+          text = sys.stdin.read()
+          if "update-type: version-update:semver-major" in text:
+              sys.exit(3)
+          v = r"v?(\d+)\.(\d+)[^\s\x60|]*"
+          pairs = re.findall(r"from " + v + r" to " + v, text)
+          pairs += re.findall(r"\|\s*\x60" + v + r"\x60\s*\|\s*\x60" + v + r"\x60\s*\|", text)
+          typed = re.search(r"update-type: version-update:semver-(minor|patch)", text)
+          if not pairs and not typed:
+              sys.exit(4)
+          for a1, a2, b1, b2 in pairs:
+              if a1 != b1 or (a1 == "0" and a2 != b2):
+                  sys.exit(3)
+          ' || rc=$?
+          case $rc in
+            0) ;;
+            3) echo "PR #$pr includes a major version change: leaving it for review."; exit 0 ;;
+            *) echo "PR #$pr: could not read versions from its commits: leaving it for review."; exit 0 ;;
+          esac
+
+          # Two Dependabot PRs can each be green and still text-merge into a
+          # lockfile pnpm rejects. If the base branch changed dependency files
+          # since this PR branched, bring the branch up to date instead: Vercel
+          # then builds the combined result and its status brings us back here.
+          # A branch update pushed with this job's token starts no workflows, so
+          # a CI-gated repo would never re-check it; there the PR waits for
+          # Dependabot to rebase it.
+          changed=$(gh api "repos/$REPO/compare/$SHA...$BASE" \
+            --jq '[.files[]?.filename | select(test("(^|/)(package\\.json|package-lock\\.json|pnpm-lock\\.yaml|pnpm-workspace\\.yaml|yarn\\.lock|\\.npmrc)$"))] | length')
+          case $changed in
+            ''|*[!0-9]*) echo "PR #$pr: could not compare with $BASE: leaving it."; exit 0 ;;
+            0) ;;
+            *)
+              if [ "$EVENT" = workflow_run ]; then
+                echo "::notice::PR #$pr: $BASE changed dependency files since it branched; leaving it for Dependabot to rebase."
+                exit 0
+              fi
+              echo "PR #$pr: $BASE changed dependency files since it branched; updating the branch."
+              gh pr update-branch "$pr" -R "$REPO" \
+                || echo "::notice::Branch update failed, probably a conflict; Dependabot rebases conflicting PRs itself."
+              exit 0 ;;
+          esac
+
+          gh pr merge "$pr" -R "$REPO" --squash --match-head-commit "$SHA" \
+            || echo "::warning::Merging PR #$pr failed; it stays open for the next build or a human."
