@@ -62,24 +62,27 @@ jobs:
             --jq '[.statuses[] | select(.context | startswith("Vercel")) | select(.state != "success")] | length')
           if [ "$notgreen" != 0 ]; then echo "PR #$pr: ${notgreen:-?} Vercel build(s) not green yet."; exit 0; fi
 
-          # Versions appear as "from X to Y" in commit messages and, for large
-          # groups, only as a table row in the PR body (\x60 is a backtick).
+          # Read only this PR's own update list: the "Updates/Bumps ... from X to
+          # Y" lines in its commit messages and, for large groups, the update
+          # table in the PR body. The rest of the body quotes upstream release
+          # notes, which mention other packages' bumps.
           rc=0
           gh pr view "$pr" -R "$REPO" --json commits,body \
-            --jq '(.commits[] | .messageHeadline + "\n" + .messageBody), .body' | python3 -c '
+            --jq '(.commits[] | .messageHeadline + "\n" + .messageBody), "@@BODY@@", .body' | python3 -c '
           import re, sys
-          text = sys.stdin.read()
-          if "update-type: version-update:semver-major" in text:
+          commits, _, body = sys.stdin.read().partition("\n@@BODY@@\n")
+          if "update-type: version-update:semver-major" in commits:
               sys.exit(3)
-          v = r"v?(\d+)\.(\d+)[^\s\x60|]*"
-          pairs = re.findall(r"from " + v + r" to " + v, text)
-          pairs += re.findall(r"\|\s*\x60" + v + r"\x60\s*\|\s*\x60" + v + r"\x60\s*\|", text)
-          typed = re.search(r"update-type: version-update:semver-(minor|patch)", text)
+          v = r"v?(\d+)\.\d+[^\s\x60|]*"
+          pairs = re.findall(r"^(?:Updates|Bumps) \S+ from " + v + r" to " + v, commits, re.M)
+          table = re.search(r"^\| Package \| From \| To \|\n\|[- |]+\|\n((?:\|.*\n?)*)", body, re.M)
+          if table:
+              pairs += re.findall(r"\|\s*\x60" + v + r"\x60\s*\|\s*\x60" + v + r"\x60\s*\|", table.group(1))
+          typed = re.search(r"update-type: version-update:semver-(minor|patch)", commits)
           if not pairs and not typed:
               sys.exit(4)
-          for a1, a2, b1, b2 in pairs:
-              if a1 != b1 or (a1 == "0" and a2 != b2):
-                  sys.exit(3)
+          if any(a != b for a, b in pairs):
+              sys.exit(3)
           ' || rc=$?
           case $rc in
             0) ;;
