@@ -9,6 +9,7 @@ overrides:
   form-data: '>=4.0.6'
   sharp@0: ^0.35.5
   nanoid@3: ^3.3.18
+  source-map-js@1: ^1.2.2
 
 importers:
 
@@ -393,8 +394,8 @@ packages:
       '@types/node':
         optional: true
 
-  source-map-js@1.2.1:
-    resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
+  source-map-js@1.2.2:
+    resolution: {integrity: sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==}
     engines: {node: '>=0.10.0'}
 
   standardwebhooks@1.1.1:
@@ -650,7 +651,7 @@ snapshots:
     dependencies:
       nanoid: 3.3.18
       picocolors: 1.1.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   postgres@3.4.9: {}
 
@@ -700,7 +701,7 @@ snapshots:
       '@types/node': 26.4.1
     optional: true
 
-  source-map-js@1.2.1: {}
+  source-map-js@1.2.2: {}
 
   standardwebhooks@1.1.1:
     dependencies:
